@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  coturn:
+    image: coturn/coturn:latest
+    container_name: coturn_server
+    network_mode: "host" # Use host networking for TURN/STUN UDP relays
+    command: >
+      -n
+      --log-file=stdout
+      --min-port=49152
+      --max-port=65535
+      --realm=remote-control.local
+      --user=testuser:testpassword
+      --no-tls
+      --no-dtls
+      --listening-port=3478
+    restart: unless-stopped

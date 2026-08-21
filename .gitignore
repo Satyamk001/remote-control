@@ -1,0 +1,9 @@
+node_modules
+meet-ui
+*.zip
+.zip
+zip
+*.exe
+release_build
+target/
+Cargo.lock
