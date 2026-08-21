@@ -343,7 +343,10 @@ async fn approve_connection(
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 
                 tracing::info!("Initializing DXGI Desktop Duplication API (Zero-Copy VRAM pipeline)...");
+                #[cfg(target_os = "windows")]
                 let capture_res = screen_capture::dxgi::WindowsScreenCapture::new(0, 0);
+                #[cfg(not(target_os = "windows"))]
+                let capture_res: Result<(), ()> = Err(());
                 
                 let mut _encoder = video::encoder::create_best_encoder();
                 
@@ -462,7 +465,7 @@ fn main() {
             // Start Signaling Client in background
             let app_handle = app.handle();
             tauri::async_runtime::spawn(async move {
-                match networking::signaling::SignalingClient::connect("ws://127.0.0.1:8081", &device_id_hex).await {
+                match networking::signaling::SignalingClient::connect("wss://remote-control-y1jb.onrender.com", &device_id_hex).await {
                     Ok(client) => {
                         info!("Connected to signaling server as {}", device_id_hex);
                         

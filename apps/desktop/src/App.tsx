@@ -41,10 +41,10 @@ function App() {
       {/* Sidebar Navigation */}
       <aside className="w-64 border-r border-border bg-card flex flex-col p-4 shadow-sm z-10">
         <div className="mb-6 h-[40px] flex items-center px-2">
-          <MorphingText words={["Remote", "Control", "MeetUI", "System"]} className="text-xl font-semibold tracking-tight text-foreground !text-left" />
+          <MorphingText words={["Remote Control", "Workstation", "P2P Stream"]} className="text-lg font-bold tracking-tight text-foreground !text-left" />
         </div>
         
-        <nav className="flex flex-col space-y-2 relative">
+        <nav className="flex flex-col space-y-1.5 relative">
           {(["client", "host"] as const).map((tab) => {
             const isActive = activeTab === tab;
             return (
@@ -52,7 +52,7 @@ function App() {
                 key={tab}
                 onClick={() => setActiveTab(tab)}
                 className={cn(
-                  "relative group flex items-center justify-between px-4 py-3 text-sm font-semibold rounded-md transition-all duration-300 outline-none w-full",
+                  "relative group flex items-center justify-between px-3.5 py-2.5 text-xs font-semibold rounded-lg transition-all duration-200 outline-none w-full",
                   isActive
                     ? "text-primary-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98]"
@@ -61,7 +61,7 @@ function App() {
                 {isActive && (
                   <motion.div
                     layoutId="sidebar-active-tab"
-                    className="absolute inset-0 bg-primary rounded-md -z-10"
+                    className="absolute inset-0 bg-primary rounded-lg -z-10"
                     initial={false}
                     transition={{
                       type: "spring",
@@ -71,10 +71,10 @@ function App() {
                   />
                 )}
                 {!isActive && (
-                  <div className="absolute inset-0 bg-secondary/50 opacity-0 group-hover:opacity-100 rounded-md transition-opacity duration-200 -z-10" />
+                  <div className="absolute inset-0 bg-secondary/50 opacity-0 group-hover:opacity-100 rounded-lg transition-opacity duration-150 -z-10" />
                 )}
                 <span className="relative z-10">
-                  {tab === "client" ? "Connect (Client)" : "This Device (Host)"}
+                  {tab === "client" ? "Connect" : "Host Agent"}
                 </span>
               </button>
             );

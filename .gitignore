@@ -6,4 +6,10 @@ zip
 *.exe
 release_build
 target/
+target_linux/
+apps/desktop/src-tauri/target_linux/
 Cargo.lock
+.agents
+.codex
+.impeccable
+*.db

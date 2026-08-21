@@ -62,7 +62,11 @@ impl SignalingClient {
     }
 
     pub async fn connect(url: &str, device_id: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let (ws_stream, _) = connect_async(Url::parse(url)?).await?;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = Url::parse(url)?.into_client_request()?;
+        request.headers_mut().insert("ngrok-skip-browser-warning", "1".parse().unwrap());
+        
+        let (ws_stream, _) = connect_async(request).await?;
         let (mut write, mut read) = ws_stream.split();
 
         let (tx, mut rx) = mpsc::channel::<Message>(32);
