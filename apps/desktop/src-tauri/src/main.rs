@@ -28,6 +28,7 @@ struct AppSession {
     webrtc: tokio::sync::RwLock<Option<std::sync::Arc<webrtc_lib::transport::WebRtcTransport>>>,
     pending_offer: tokio::sync::RwLock<Option<(String, String)>>,
     pending_ice: tokio::sync::RwLock<Vec<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>>,
+    auto_accept: tokio::sync::RwLock<bool>,
 }
 
 #[tauri::command]
@@ -255,6 +256,18 @@ async fn get_host_session_status(session: tauri::State<'_, AppSession>) -> Resul
     }))
 }
 
+
+#[tauri::command]
+async fn toggle_auto_accept(enabled: bool, session: tauri::State<'_, AppSession>) -> Result<(), String> {
+    *session.auto_accept.write().await = enabled;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_auto_accept(session: tauri::State<'_, AppSession>) -> Result<bool, String> {
+    Ok(*session.auto_accept.read().await)
+}
+
 #[tauri::command]
 async fn approve_connection(
     allowed: bool, 
@@ -271,6 +284,18 @@ async fn approve_connection(
     let offer_data = session.pending_offer.write().await.take();
     if let Some((session_id, sdp)) = offer_data {
         let c = client.inner().as_ref().unwrap().clone();
+        process_offer_internal(session.inner(), c, session_id, sdp).await?;
+    }
+    
+    Ok(())
+}
+
+async fn process_offer_internal(
+    session: &AppSession,
+    c: networking::signaling::SignalingClient,
+    session_id: String,
+    sdp: String
+) -> Result<(), String> {
         
         let (ice_tx, mut ice_rx) = tokio::sync::mpsc::channel::<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>(32);
         let (data_tx, mut data_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
@@ -393,8 +418,6 @@ async fn approve_connection(
                 }
             }
         }
-    }
-    
     Ok(())
 }
 
@@ -445,6 +468,7 @@ fn main() {
                 webrtc: tokio::sync::RwLock::new(None),
                 pending_offer: tokio::sync::RwLock::new(None),
                 pending_ice: tokio::sync::RwLock::new(Vec::new()),
+                auto_accept: tokio::sync::RwLock::new(false),
             });
             
             // Start Telemetry Loop
@@ -479,7 +503,14 @@ fn main() {
                                     networking::signaling::SignalingEvent::SdpOffer { session_id, sdp } => {
                                         info!("Host received SDP Offer for session: {}", session_id);
                                         let state = app_handle_clone.state::<AppSession>();
-                                        *state.pending_offer.write().await = Some((session_id, sdp));
+                                        let is_auto = *state.auto_accept.read().await;
+                                        if is_auto {
+                                            info!("Auto-accepting connection request...");
+                                            let c = client_clone.clone();
+                                            let _ = process_offer_internal(state.inner(), c, session_id, sdp).await;
+                                        } else {
+                                            *state.pending_offer.write().await = Some((session_id, sdp));
+                                        }
                                     }
                                     networking::signaling::SignalingEvent::SdpAnswer { session_id, sdp } => {
                                         info!("Client received SDP Answer for session: {}", session_id);
@@ -529,7 +560,9 @@ fn main() {
             get_local_device_id,
             get_host_session_status,
             approve_connection,
-            terminate_host_session
+            terminate_host_session,
+            toggle_auto_accept,
+            get_auto_accept
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

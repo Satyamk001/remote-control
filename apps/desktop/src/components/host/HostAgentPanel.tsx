@@ -12,7 +12,9 @@ import {
   Radio, 
   ShieldCheck, 
   CheckCircle2, 
-  Cpu
+  Cpu,
+  Lock,
+  Unlock
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -30,9 +32,11 @@ export function HostAgentPanel() {
   const [deviceId, setDeviceId] = useState("Loading...");
   const [status, setStatus] = useState<HostStatus>({ state: "idle" });
   const [copied, setCopied] = useState(false);
+  const [autoAccept, setAutoAccept] = useState(false);
 
   useEffect(() => {
     invoke<string>("get_local_device_id").then(setDeviceId).catch(console.error);
+    invoke<boolean>("get_auto_accept").then(setAutoAccept).catch(console.error);
 
     const interval = setInterval(() => {
       invoke<HostStatus>("get_host_session_status")
@@ -54,6 +58,13 @@ export function HostAgentPanel() {
 
   const handleDisconnect = () => {
     invoke("terminate_host_session").catch(console.error);
+  };
+
+  const toggleAutoAccept = () => {
+    const nextState = !autoAccept;
+    invoke("toggle_auto_accept", { enabled: nextState })
+      .then(() => setAutoAccept(nextState))
+      .catch(console.error);
   };
 
   return (
@@ -118,6 +129,22 @@ export function HostAgentPanel() {
                 <span>Copy ID</span>
               </>
             )}
+          </Button>
+        </div>
+
+        <div className="mt-4 pt-4 border-t border-border/30 flex items-center justify-between">
+          <div className="space-y-0.5">
+            <h4 className="text-sm font-semibold text-foreground">Unattended Access</h4>
+            <p className="text-[11px] text-muted-foreground">Automatically accept incoming connection requests without prompting.</p>
+          </div>
+          <Button
+            variant={autoAccept ? "default" : "outline"}
+            size="sm"
+            onClick={toggleAutoAccept}
+            className={`h-8 gap-2 text-xs font-medium transition-all ${autoAccept ? "bg-amber-500 hover:bg-amber-600 text-black border-none" : "border-border/60 hover:bg-secondary/60 text-muted-foreground"}`}
+          >
+            {autoAccept ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
+            {autoAccept ? "Auto-Accept: ON" : "Auto-Accept: OFF"}
           </Button>
         </div>
       </div>
