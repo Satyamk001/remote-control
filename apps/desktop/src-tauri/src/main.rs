@@ -74,7 +74,10 @@ fn now_micros() -> u64 {
 /// split the continuous byte stream back into discrete `EncodedVideoChunk`s and
 /// tag key vs delta frames without parsing the Annex-B start codes itself.
 fn frame_h264(payload: &[u8], is_keyframe: bool) -> Vec<u8> {
-    let mut out = Vec::with_capacity(5 + payload.len());
+    // Wire format: ["RCV1"][u8 flags][u32 LE len][payload]. The magic lets the
+    // viewer resync if it ever starts mid-frame (reconnect / codec switch).
+    let mut out = Vec::with_capacity(9 + payload.len());
+    out.extend_from_slice(b"RCV1");
     out.push(if is_keyframe { 1u8 } else { 0u8 });
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     out.extend_from_slice(payload);

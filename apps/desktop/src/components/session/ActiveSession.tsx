@@ -30,7 +30,7 @@ export function ActiveSession({
   onDisconnect: () => void; 
 }) {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [connectionState, setConnectionState] = useState<"connected" | "reconnecting" | "failed">("connected");
+  const [connectionState, setConnectionState] = useState<"connected" | "reconnecting" | "failed" | "ended">("connected");
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [monitorIndex, setMonitorIndex] = useState(0);
@@ -49,15 +49,59 @@ export function ActiveSession({
   const mutedRef = useRef<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
-  // Decide the video path: H.264 via WebCodecs when available (Windows/WebView2),
-  // else MJPEG into an <img> (e.g. WebKitGTK on Linux has no WebCodecs/H.264).
-  const useMjpeg = typeof (window as any).VideoDecoder === "undefined";
-  const imgRef = useRef<HTMLImageElement | null>(null);
+  // Video path, resolved by capability probe below:
+  //   "detecting" -> probing H.264 decode support
+  //   "h264"      -> WebCodecs can decode H.264 (Windows/WebView2)
+  //   "mjpeg"     -> fall back to JPEG <img> (e.g. WebKitGTK: the VideoDecoder
+  //                  API exists but has no H.264 backend)
+  const [videoMode, setVideoMode] = useState<"detecting" | "h264" | "mjpeg">("detecting");
 
-  // Tell the host which codec to produce, as soon as the session mounts.
+  // When the remote session ends (host left), return to the dashboard after a
+  // brief moment so the viewer isn't stranded on a dead screen.
   useEffect(() => {
-    invoke("set_codec", { codec: useMjpeg ? "mjpeg" : "h264" }).catch(() => {});
+    if (connectionState !== "ended") return;
+    const t = setTimeout(() => onDisconnect(), 2500);
+    return () => clearTimeout(t);
+  }, [connectionState]);
+
+  // Probe real H.264 decodability (not just API presence), then tell the host
+  // which codec to produce.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const AnyWin = window as any;
+      let canH264 = false;
+      try {
+        if (typeof AnyWin.VideoDecoder !== "undefined" &&
+            typeof AnyWin.VideoDecoder.isConfigSupported === "function") {
+          const res = await AnyWin.VideoDecoder.isConfigSupported({ codec: "avc1.42e01f" });
+          canH264 = !!res?.supported;
+        }
+      } catch {
+        canH264 = false;
+      }
+      if (cancelled) return;
+      setVideoMode(canH264 ? "h264" : "mjpeg");
+    })();
+    return () => { cancelled = true; };
   }, []);
+
+  // Keep telling the host our codec until a frame actually paints. The data
+  // channel may not be open on the first attempt (ICE still connecting), so a
+  // single send can be dropped silently; the host switches encoders on any
+  // arrival, so repeated sends are safe and self-correcting.
+  useEffect(() => {
+    if (videoMode === "detecting" || firstFramePainted) return;
+    let tries = 0;
+    const send = () => invoke("set_codec", { codec: videoMode }).catch(() => {});
+    send();
+    const id = setInterval(() => {
+      tries += 1;
+      if (firstFramePainted || tries > 20) { clearInterval(id); return; }
+      send();
+    }, 500);
+    return () => clearInterval(id);
+  }, [videoMode, firstFramePainted]);
 
   // Map a viewport cursor position to normalized 0..65535 absolute coordinates
   // over the remote desktop, accounting for `object-contain` letterboxing of the
@@ -65,7 +109,7 @@ export function ActiveSession({
   // area (i.e. over the black letterbox bars), so we don't inject off-screen
   // moves.
   const toRemoteCoords = (clientX: number, clientY: number): { x: number; y: number } | null => {
-    const el: HTMLElement | null = useMjpeg ? imgRef.current : canvasRef.current;
+    const el: HTMLElement | null = canvasRef.current;
     if (!el) return null;
 
     const rect = el.getBoundingClientRect();
@@ -102,7 +146,7 @@ export function ActiveSession({
   // decoded frames onto the canvas. This replaces the previous <img> MJPEG path
   // and gives real H.264 decoding (WebView2/Chromium 94+).
   useEffect(() => {
-    if (!streamUrl || useMjpeg) return;
+    if (!streamUrl || videoMode !== "h264") return;
     const AnyWin = window as any;
     if (typeof AnyWin.VideoDecoder === "undefined") {
       console.error("WebCodecs VideoDecoder unavailable in this runtime.");
@@ -184,24 +228,31 @@ export function ActiveSession({
             }
             setFirstFramePainted(false);
             setVideoStatus("Remote stream ended (host disconnected).");
+            setConnectionState("ended");
             break;
           }
           if (value) { append(value); totalBytes += value.length;
             if (!sawFirstKey) setVideoStatus(`Receiving stream (${totalBytes} bytes), waiting for keyframe…`);
           }
 
-          // Parse as many complete [flag][len][payload] units as available.
-          while (buffer.length >= 5) {
-            const flag = buffer[0];
-            const len =
-              buffer[1] | (buffer[2] << 8) | (buffer[3] << 16) | (buffer[4] << 24);
-            if (len < 0 || len > 50_000_000) {
-              // Corrupt framing; drop the connection.
-              return;
+          // Parse frames: ["RCV1"][u8 flag][u32 LE len][payload], scanning for
+          // the magic so we can resync after a mid-stream join.
+          const MAGIC = [0x52, 0x43, 0x56, 0x31]; // "RCV1"
+          while (buffer.length >= 9) {
+            if (!(buffer[0] === MAGIC[0] && buffer[1] === MAGIC[1] && buffer[2] === MAGIC[2] && buffer[3] === MAGIC[3])) {
+              buffer = buffer.slice(1); // desynced: scan forward for the magic
+              continue;
             }
-            if (buffer.length < 5 + len) break; // wait for more bytes
-            const payload = buffer.slice(5, 5 + len);
-            buffer = buffer.slice(5 + len);
+            const flag = buffer[4];
+            const len =
+              buffer[5] | (buffer[6] << 8) | (buffer[7] << 16) | (buffer[8] << 24);
+            if (len < 0 || len > 50_000_000) {
+              buffer = buffer.slice(1);
+              continue;
+            }
+            if (buffer.length < 9 + len) break; // wait for more bytes
+            const payload = buffer.slice(9, 9 + len);
+            buffer = buffer.slice(9 + len);
 
             const isKey = flag === 1;
             ensureDecoder();
@@ -257,7 +308,7 @@ export function ActiveSession({
         /* ignore */
       }
     };
-  }, [streamUrl]);
+  }, [streamUrl, videoMode]);
 
   // MJPEG fallback pipeline (for webviews without WebCodecs, e.g. WebKitGTK).
   //
@@ -265,11 +316,11 @@ export function ActiveSession({
   // each payload is a complete JPEG. We turn it into an object URL and swap it
   // into an <img>, which every webview can render.
   useEffect(() => {
-    if (!streamUrl || !useMjpeg) return;
+    if (!streamUrl || videoMode !== "mjpeg") return;
 
     let cancelled = false;
     const abort = new AbortController();
-    let lastUrl: string | null = null;
+    const ctx = canvasRef.current?.getContext("2d") ?? null;
 
     const run = async () => {
       try {
@@ -288,28 +339,49 @@ export function ActiveSession({
           if (done) {
             setFirstFramePainted(false);
             setVideoStatus("Remote stream ended (host disconnected).");
+            setConnectionState("ended");
             break;
           }
           if (value) append(value);
 
-          while (buffer.length >= 5) {
-            const len = buffer[1] | (buffer[2] << 8) | (buffer[3] << 16) | (buffer[4] << 24);
-            if (len < 0 || len > 50_000_000) return;
-            if (buffer.length < 5 + len) break;
-            const payload = buffer.slice(5, 5 + len);
-            buffer = buffer.slice(5 + len);
-
-            const blob = new Blob([payload], { type: "image/jpeg" });
-            const url = URL.createObjectURL(blob);
-            if (imgRef.current) {
-              imgRef.current.src = url;
-              const w = imgRef.current.naturalWidth, h = imgRef.current.naturalHeight;
-              if (w && h) videoSizeRef.current = { w, h };
+          // Parse frames: ["RCV1"][u8 flag][u32 LE len][payload]. Scan for the
+          // magic so a mid-stream start can resync. Keep only the newest frame.
+          let latest: Uint8Array | null = null;
+          const MAGIC = [0x52, 0x43, 0x56, 0x31]; // "RCV1"
+          while (buffer.length >= 9) {
+            if (!(buffer[0] === MAGIC[0] && buffer[1] === MAGIC[1] && buffer[2] === MAGIC[2] && buffer[3] === MAGIC[3])) {
+              // Desynced: drop one byte and keep scanning for the magic.
+              buffer = buffer.slice(1);
+              continue;
             }
-            // Revoke the previous URL to avoid leaking memory.
-            if (lastUrl) URL.revokeObjectURL(lastUrl);
-            lastUrl = url;
-            if (!firstFramePainted) setFirstFramePainted(true);
+            const len = buffer[5] | (buffer[6] << 8) | (buffer[7] << 16) | (buffer[8] << 24);
+            if (len < 0 || len > 50_000_000) { buffer = buffer.slice(1); continue; }
+            if (buffer.length < 9 + len) break;
+            latest = buffer.slice(9, 9 + len);
+            buffer = buffer.slice(9 + len);
+          }
+
+          if (latest && ctx) {
+            // createImageBitmap fully decodes the JPEG before we draw, which
+            // avoids the <img> async-load / object-URL revoke race that showed a
+            // broken-image glyph.
+            try {
+              const bytes = new Uint8Array(latest.length);
+              bytes.set(latest);
+              const blob = new Blob([bytes.buffer], { type: "image/jpeg" });
+              const bmp = await createImageBitmap(blob);
+              const canvas = canvasRef.current;
+              if (canvas && (canvas.width !== bmp.width || canvas.height !== bmp.height)) {
+                canvas.width = bmp.width;
+                canvas.height = bmp.height;
+              }
+              videoSizeRef.current = { w: bmp.width, h: bmp.height };
+              ctx.drawImage(bmp, 0, 0);
+              bmp.close();
+              if (!firstFramePainted) setFirstFramePainted(true);
+            } catch (e: any) {
+              setVideoStatus("JPEG decode failed: " + (e?.message || e));
+            }
           }
         }
       } catch (e: any) {
@@ -322,13 +394,11 @@ export function ActiveSession({
     return () => {
       cancelled = true;
       abort.abort();
-      if (lastUrl) URL.revokeObjectURL(lastUrl);
     };
-  }, [streamUrl]);
+  }, [streamUrl, videoMode]);
 
   // Web Audio playback of the host's system audio.
-  //
-  // The host first sends a format header ("RCAF" + u32 LE sample_rate + u16 LE
+  //  // The host first sends a format header ("RCAF" + u32 LE sample_rate + u16 LE
   // channels), then a continuous stream of interleaved f32 LE PCM. We parse the
   // header to configure the AudioContext (sample rate) and channel
   // deinterleaving instead of assuming a fixed format, then schedule small
@@ -612,19 +682,11 @@ export function ActiveSession({
     >
       {/* Video Streaming Canvas (WebCodecs H.264 decode target) */}
       <div className={`w-full h-full flex items-center justify-center transition-opacity duration-500 ${connectionState !== "connected" ? "opacity-30 blur-sm" : "opacity-100"}`}>
-        {useMjpeg ? (
-          <img
-            ref={imgRef}
-            className="w-full h-full object-contain pointer-events-none"
-            alt={`Video Stream from ${deviceId}`}
-          />
-        ) : (
-          <canvas
-            ref={canvasRef}
-            className="w-full h-full object-contain pointer-events-none"
-            aria-label={`Video Stream from ${deviceId}`}
-          />
-        )}
+        <canvas
+          ref={canvasRef}
+          className="w-full h-full object-contain pointer-events-none"
+          aria-label={`Video Stream from ${deviceId}`}
+        />
       </div>
 
       {/* Video pipeline status (hidden once the first frame paints) */}
@@ -676,21 +738,25 @@ export function ActiveSession({
         )}
 
         {/* Failed Connection Overlay */}
-        {connectionState === "failed" && (
+        {(connectionState === "failed" || connectionState === "ended") && (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="absolute inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-6"
           >
-            <div className="bg-card/80 border border-destructive/40 rounded-2xl p-8 max-w-md w-full text-center space-y-6 shadow-2xl">
-              <div className="w-14 h-14 rounded-full bg-destructive/10 border border-destructive/20 text-destructive flex items-center justify-center mx-auto">
+            <div className="bg-card/80 border border-border/40 rounded-2xl p-8 max-w-md w-full text-center space-y-6 shadow-2xl">
+              <div className="w-14 h-14 rounded-full bg-secondary/60 border border-border/40 text-muted-foreground flex items-center justify-center mx-auto">
                 <WifiOff className="w-7 h-7" />
               </div>
               <div>
-                <h3 className="text-xl font-bold text-foreground">Connection Terminated</h3>
+                <h3 className="text-xl font-bold text-foreground">
+                  {connectionState === "ended" ? "Session Ended" : "Connection Lost"}
+                </h3>
                 <p className="text-xs text-muted-foreground mt-2">
-                  The WebRTC peer connection to {deviceId.substring(0, 12)}... could not be maintained.
+                  {connectionState === "ended"
+                    ? "The host ended the session. Returning to your devices…"
+                    : `The connection to ${deviceId.substring(0, 12)}… could not be maintained.`}
                 </p>
               </div>
               <div className="flex gap-3">

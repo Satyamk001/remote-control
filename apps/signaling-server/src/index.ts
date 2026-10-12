@@ -59,6 +59,10 @@ wss.on('connection', (ws, req) => {
     const connectionId = crypto.randomUUID();
     connectionManager.addConnection(connectionId, ws);
 
+    // Liveness: mark alive on any pong; the sweeper below terminates stale ones.
+    (ws as any).isAlive = true;
+    ws.on('pong', () => { (ws as any).isAlive = true; });
+
     ws.on('message', (data) => {
         const messageStr = data.toString();
         const msg = MessageValidator.validate(messageStr);
@@ -73,5 +77,23 @@ wss.on('connection', (ws, req) => {
         controller.handleDisconnect(connectionId);
     });
 });
+
+// Heartbeat sweep: ping every client every 10s; terminate any that missed the
+// previous ping. Terminating fires 'close', which prunes the host's session so
+// a crashed/killed host disappears from the device list within ~10-20s instead
+// of lingering until TCP timeout.
+const HEARTBEAT_MS = 10000;
+const heartbeat = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if ((ws as any).isAlive === false) {
+            ws.terminate();
+            return;
+        }
+        (ws as any).isAlive = false;
+        try { ws.ping(); } catch { /* ignore */ }
+    });
+}, HEARTBEAT_MS);
+
+wss.on('close', () => clearInterval(heartbeat));
 
 console.log(`Signaling server listening on ws://localhost:${port}`);
