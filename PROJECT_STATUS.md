@@ -43,26 +43,43 @@ mocked. These are being replaced with real implementations:
   environment-driven (`REMOTE_CONTROL_SIGNALING_URL`, `REMOTE_CONTROL_STUN_URL`,
   `REMOTE_CONTROL_TURN_URL` / `_USER` / `_PASS`). See `docs/configuration.md`.
   Previously the TURN relay was hardcoded to `127.0.0.1` with test creds.
+- **Real H.264 video** (DONE): `crates/video/src/h264.rs` encodes DXGI BGRA
+  frames to Annex-B H.264 via OpenH264; the host streams length+keyframe-flag
+  framed access units; the viewer decodes with the WebCodecs `VideoDecoder` to a
+  canvas. Replaced the JPEG/MJPEG shortcut. Verified via WSL cross-compile.
+- **Adaptive bitrate + real RTT** (DONE): app-level ping/pong over the data
+  channel measures real RTT (EWMA-smoothed) and drives an adaptive capture
+  frame-rate; the previous fake latency value is removed.
+- **Audio wiring** (DONE): `cpal` WASAPI loopback is wired into the live session
+  over a dedicated `audio-stream` channel. The host advertises its real format
+  via an "RCAF" header (sample rate + channels); the viewer plays PCM via the
+  Web Audio API. Mute is honored host-side via `DataPacket::ToggleAudio`.
+- **File transfer wiring** (DONE): viewer -> host upload via the Upload button
+  chunks files (16KB, CRC32) over the data channel; the host reassembles with
+  `remote_core::transfer::FileReceiver` (seq + checksum + path-traversal guard)
+  into `./downloads`.
+- **Per-stage metrics** (DONE): `get_diagnostics` now returns real
+  host-measured capture + encode latency, resolution, RTT jitter, and a
+  viewer-reported WebCodecs decode latency, in addition to FPS/bitrate/RTT.
+  Packet loss is reported as reliable (SCTP retransmits).
 
 ## Remaining Work Toward the Goal (1080p low-latency workstation)
 
-- **Real video codec**: The live pipeline currently ships JPEG frames over a
-  WebRTC DataChannel, re-served to the UI as MJPEG. The `video` crate's
-  `HardwareVideoEncoder` is a stub (logs NVENC but clones the buffer). Needed:
-  real H.264 encode/decode, ideally over a WebRTC video track (RTP/SRTP) to
-  unlock congestion control and hardware (NVENC/QuickSync) encoding. This is the
-  primary gap for the 1080p/60 FPS target.
-- **Audio wiring**: `cpal` loopback capture exists in a crate but is not wired
-  into the live Tauri session loop.
-- **File transfer wiring**: `file-transfer` crate (chunked, CRC32) is not yet
-  reachable from the UI / active DataPacket loop.
-- **Full metrics**: Only aggregate RTT/FPS/bitrate are surfaced; the spec's
-  per-stage latency / jitter / packet-loss breakdown is not yet implemented.
+- **Hardware video encode**: the `video` crate's `HardwareVideoEncoder` is still
+  a stub; real NVENC/QuickSync via Media Foundation would cut encode latency and
+  CPU for the 1080p/60 target. Software OpenH264 is the current path.
+- **Real-hardware verification**: all of the above is verified only to compile
+  (WSL cross-compile) and type-check. It has NOT been run on real Windows
+  hardware with two peers. Runtime verification of H.264 decode in WebView2,
+  audio format/sync, and file integrity is the next required step.
+- **Known robustness gaps**: audio format header relies on send/connect ordering
+  (no explicit handshake); file upload passes the whole buffer through IPC.
 
 ## Current Focus
 
-End-to-end smoke test on real Windows hardware (host + viewer + signaling), then
-the real H.264 video pipeline.
+End-to-end smoke test on real Windows hardware (host + viewer + signaling):
+verify H.264 render, input, audio, clipboard, and file transfer actually work
+over LAN, then internet (Machine 3). Then hardware video encode.
 
 ## Known Issues / Limitations
 

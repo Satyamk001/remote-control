@@ -17,6 +17,14 @@ static CURRENT_BITRATE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_LATENCY: AtomicUsize = AtomicUsize::new(42);
 /// Viewer-controlled audio mute. When true, the host stops shipping audio PCM.
 static AUDIO_MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Host-measured per-stage telemetry (microseconds / packed values).
+static ENCODE_LATENCY_US: AtomicUsize = AtomicUsize::new(0);
+static CAPTURE_LATENCY_US: AtomicUsize = AtomicUsize::new(0);
+static RTT_JITTER_MS: AtomicUsize = AtomicUsize::new(0);
+/// Current capture resolution, packed as (width << 16) | height.
+static CURRENT_RESOLUTION: AtomicUsize = AtomicUsize::new(0);
+/// Viewer-reported decode latency (microseconds), set via report_decode_latency.
+static DECODE_LATENCY_US: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub enum DataPacket {
@@ -167,13 +175,48 @@ async fn get_diagnostics() -> Result<serde_json::Value, String> {
     let latency_ms = CURRENT_LATENCY.load(Ordering::Relaxed);
     let (_q, delay_ms) = adaptive_params(latency_ms);
     let fps = if delay_ms > 0 { 1000 / delay_ms } else { 0 };
-    
+
+    let encode_us = ENCODE_LATENCY_US.load(Ordering::Relaxed);
+    let capture_us = CAPTURE_LATENCY_US.load(Ordering::Relaxed);
+    let decode_us = DECODE_LATENCY_US.load(Ordering::Relaxed);
+    let jitter_ms = RTT_JITTER_MS.load(Ordering::Relaxed);
+    let res = CURRENT_RESOLUTION.load(Ordering::Relaxed);
+    let (w, h) = ((res >> 16) & 0xFFFF, res & 0xFFFF);
+    let resolution = if w > 0 && h > 0 {
+        format!("{}x{}", w, h)
+    } else {
+        "—".to_string()
+    };
+
+    let fmt_us = |us: usize| -> String {
+        if us == 0 { "—".to_string() } else { format!("{:.1}ms", us as f64 / 1000.0) }
+    };
+
     Ok(serde_json::json!({
         "fps": fps, // adaptive, derived from live RTT
-        "latency": format!("{}ms", latency_ms),
         "bitrate": format!("{:.2} Mbps", bitrate_kbps as f64 / 1000.0),
-        "packetLoss": "0%" // SCTP DataChannels are reliable, so packet loss is handled at the protocol layer
+        "rtt": format!("{}ms", latency_ms),
+        // SCTP DataChannels are reliable (retransmitted), so there is no
+        // application-visible packet loss to report.
+        "packet_loss": "0% (reliable)",
+        "jitter": format!("{}ms", jitter_ms),
+        "capture_latency": fmt_us(capture_us),
+        "encode_latency": fmt_us(encode_us),
+        "decode_latency": fmt_us(decode_us),
+        "resolution": resolution,
+        "codec": "H.264 (OpenH264)",
+        "network": "WebRTC P2P (DataChannel)",
+        // Legacy field kept for the top status pill.
+        "latency": format!("{}ms", latency_ms)
     }))
+}
+
+/// Viewer -> host: report measured WebCodecs decode latency (microseconds) so
+/// the diagnostics HUD can show a real end-to-end picture.
+#[tauri::command]
+fn report_decode_latency(micros: u32) -> Result<(), String> {
+    DECODE_LATENCY_US.store(micros as usize, Ordering::Relaxed);
+    Ok(())
 }
 
 #[tauri::command]
@@ -569,6 +612,11 @@ async fn process_offer_internal(
                                         let prev = CURRENT_LATENCY.load(Ordering::Relaxed);
                                         let smoothed = (prev * 3 + rtt_ms) / 4;
                                         CURRENT_LATENCY.store(smoothed, Ordering::Relaxed);
+                                        // Jitter: EWMA of the absolute RTT delta
+                                        // (RFC3550-style interarrival jitter).
+                                        let delta = rtt_ms.abs_diff(prev);
+                                        let pj = RTT_JITTER_MS.load(Ordering::Relaxed);
+                                        RTT_JITTER_MS.store((pj * 7 + delta) / 8, Ordering::Relaxed);
                                     }
                                     DataPacket::Disconnect => {
                                         info!("Host received Disconnect packet, closing session.");
@@ -686,10 +734,24 @@ async fn process_offer_internal(
                                         }
                                     }
 
+                                    let cap_start = std::time::Instant::now();
                                     match capture.capture_frame() {
                                         Ok(frame) => {
+                                            CAPTURE_LATENCY_US.store(
+                                                cap_start.elapsed().as_micros() as usize,
+                                                Ordering::Relaxed,
+                                            );
+                                            CURRENT_RESOLUTION.store(
+                                                ((frame.width as usize) << 16) | (frame.height as usize),
+                                                Ordering::Relaxed,
+                                            );
+                                            let enc_start = std::time::Instant::now();
                                             match video::VideoEncoder::encode(&mut encoder, &frame) {
                                                 Ok(encoded) if !encoded.data.is_empty() => {
+                                                    ENCODE_LATENCY_US.store(
+                                                        enc_start.elapsed().as_micros() as usize,
+                                                        Ordering::Relaxed,
+                                                    );
                                                     let wire = frame_h264(
                                                         &encoded.data,
                                                         encoded.is_keyframe,
@@ -982,6 +1044,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_devices,
             get_diagnostics,
+            report_decode_latency,
             connect_to_device,
             switch_monitor,
             send_input_event,

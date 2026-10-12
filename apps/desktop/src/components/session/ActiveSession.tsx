@@ -100,6 +100,10 @@ export function ActiveSession({
     const abort = new AbortController();
     let decoder: any = null;
     let configured = false;
+    // Decode-latency tracking (approximate, FIFO): submit time of the most
+    // recent chunk, and a throttle so we only report ~once/sec.
+    let lastSubmitMs = 0;
+    let lastReportMs = 0;
 
     const ctx = canvasRef.current?.getContext("2d") ?? null;
 
@@ -114,6 +118,14 @@ export function ActiveSession({
         }
         videoSizeRef.current = { w, h };
         if (ctx) ctx.drawImage(frame, 0, 0);
+
+        // Report decode latency at most once per second.
+        const nowMs = performance.now();
+        if (lastSubmitMs > 0 && nowMs - lastReportMs > 1000) {
+          lastReportMs = nowMs;
+          const micros = Math.max(0, Math.round((nowMs - lastSubmitMs) * 1000));
+          invoke("report_decode_latency", { micros }).catch(() => {});
+        }
       } finally {
         frame.close();
       }
@@ -180,6 +192,7 @@ export function ActiveSession({
                 timestamp: performance.now() * 1000,
                 data: payload,
               });
+              lastSubmitMs = performance.now();
               decoder.decode(chunk);
             } catch (e) {
               console.error("decode() failed:", e);

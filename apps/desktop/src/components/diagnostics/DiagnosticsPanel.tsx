@@ -8,6 +8,7 @@ interface Metrics {
   rtt: string;
   packet_loss: string;
   jitter: string;
+  capture_latency: string;
   encode_latency: string;
   decode_latency: string;
   resolution: string;
@@ -48,8 +49,9 @@ export function DiagnosticsPanel() {
         <div className="flex justify-between"><span>Packet Loss</span><span>{metrics.packet_loss}</span></div>
         <div className="flex justify-between"><span>Jitter</span><span>{metrics.jitter}</span></div>
         <div className="flex justify-between text-muted-foreground mt-2 pt-2 border-t border-zinc-800">
-          <span>Encode Latency</span><span>{metrics.encode_latency}</span>
+          <span>Capture Latency</span><span>{metrics.capture_latency}</span>
         </div>
+        <div className="flex justify-between"><span>Encode Latency</span><span>{metrics.encode_latency}</span></div>
         <div className="flex justify-between"><span>Decode Latency</span><span>{metrics.decode_latency}</span></div>
       </CardContent>
     </Card>
