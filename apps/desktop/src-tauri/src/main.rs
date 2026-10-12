@@ -24,6 +24,85 @@ pub enum DataPacket {
     Disconnect,
 }
 
+/// Convert a captured frame buffer into a JPEG image.
+///
+/// DXGI desktop duplication delivers BGRA8 (4 bytes/px). The `image` crate's
+/// JPEG encoder expects RGB, so we drop alpha and swap B/R channels. The buffer
+/// passed in is already tightly packed (row padding stripped by the capturer).
+fn encode_frame_to_jpeg(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    format: screen_capture::PixelFormat,
+) -> Option<Vec<u8>> {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 || data.len() < w * h * 4 {
+        return None;
+    }
+
+    let mut rgb = vec![0u8; w * h * 3];
+    match format {
+        screen_capture::PixelFormat::Bgra8 | screen_capture::PixelFormat::Unknown => {
+            // Treat Unknown as BGRA (DXGI's native desktop format) by default.
+            for i in 0..(w * h) {
+                let s = i * 4;
+                let d = i * 3;
+                rgb[d] = data[s + 2]; // R <- B-position (BGRA)
+                rgb[d + 1] = data[s + 1]; // G
+                rgb[d + 2] = data[s]; // B <- R-position
+            }
+        }
+        screen_capture::PixelFormat::Rgba8 => {
+            for i in 0..(w * h) {
+                let s = i * 4;
+                let d = i * 3;
+                rgb[d] = data[s];
+                rgb[d + 1] = data[s + 1];
+                rgb[d + 2] = data[s + 2];
+            }
+        }
+    }
+
+    let img: image::RgbImage = image::ImageBuffer::from_raw(width, height, rgb)?;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 75)
+        .encode_image(&img)
+        .ok()?;
+    Some(cursor.into_inner())
+}
+
+/// Fallback animated test pattern used when native DXGI capture is unavailable
+/// (e.g. WSL/Linux builds). Keeps the stream alive so the UI pipeline can be
+/// exercised without a real desktop capture backend.
+fn run_mock_capture(
+    frame_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    switch_rx: std::sync::mpsc::Receiver<u32>,
+) {
+    let mut x_shift: u8 = 0;
+    loop {
+        // Drain any switch requests so the channel doesn't back up.
+        while switch_rx.try_recv().is_ok() {}
+
+        let mut img = image::RgbImage::new(320, 180);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgb([x_shift.wrapping_add(x as u8), 100, y as u8]);
+        }
+        x_shift = x_shift.wrapping_add(5);
+
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        if image::codecs::jpeg::JpegEncoder::new(&mut cursor)
+            .encode_image(&img)
+            .is_ok()
+        {
+            if frame_tx.blocking_send(cursor.into_inner()).is_err() {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(33));
+    }
+}
+
 struct AppSession {
     webrtc: tokio::sync::RwLock<Option<std::sync::Arc<webrtc_lib::transport::WebRtcTransport>>>,
     pending_offer: tokio::sync::RwLock<Option<(String, String)>>,
@@ -312,13 +391,18 @@ async fn process_offer_internal(
         
         if let Ok(transport) = webrtc_lib::transport::WebRtcTransport::new(true, ice_tx, data_tx, video_tx).await {
             let vc = transport.video_channel.clone();
-            
+
+            // Channel used to forward monitor-switch requests from the data loop
+            // to the (blocking) capture loop. std::sync::mpsc so it can be polled
+            // from the spawn_blocking capture thread without async.
+            let (switch_tx, switch_rx) = std::sync::mpsc::channel::<u32>();
+
             // Host Data Loop (Injector & Clipboard)
             let dc = transport.data_channel.clone();
             let pc = transport.peer_connection.clone();
             tokio::spawn(async move {
                 use input::WindowsInputInjector;
-                let injector = input::DummyInjector;
+                let injector = input::create_injector();
                 let mut clip = remote_core::clipboard::ClipboardManager::new();
                 let mut last_text = clip.get_text().unwrap_or_default();
                 
@@ -336,6 +420,7 @@ async fn process_offer_internal(
                                     }
                                     DataPacket::SwitchMonitor(index) => {
                                         info!("Host received SwitchMonitor({})", index);
+                                        let _ = switch_tx.send(index as u32);
                                     }
                                     DataPacket::Disconnect => {
                                         info!("Host received Disconnect packet, closing session.");
@@ -362,43 +447,115 @@ async fn process_offer_internal(
                 }
             });
             
-            // Host Video Capture Loop (Mock Desktop Capture via JPEG generation)
-            tokio::spawn(async move {
-                // Wait a tiny bit for channel to fully open
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                
-                tracing::info!("Initializing DXGI Desktop Duplication API (Zero-Copy VRAM pipeline)...");
-                #[cfg(target_os = "windows")]
-                let capture_res = screen_capture::dxgi::WindowsScreenCapture::new(0, 0);
-                #[cfg(not(target_os = "windows"))]
-                let capture_res: Result<(), ()> = Err(());
-                
-                let mut _encoder = video::encoder::create_best_encoder();
-                
-                if capture_res.is_err() {
-                    tracing::warn!("Native DXGI Capture failed (WSL environment). Falling back to software mock generator.");
-                }
-                
-                if let Some(channel) = vc {
-                    let mut x_shift: u8 = 0;
-                    loop {
-                        let mut img = image::RgbImage::new(100, 100);
-                        for (x, y, p) in img.enumerate_pixels_mut() {
-                            *p = image::Rgb([x_shift.wrapping_add(x as u8), 100, y as u8]);
-                        }
-                        x_shift = x_shift.wrapping_add(5);
-                        
-                        let mut cursor = std::io::Cursor::new(Vec::new());
-                        let _ = image::codecs::jpeg::JpegEncoder::new(&mut cursor).encode_image(&img);
-                        let bytes = cursor.into_inner();
-                        
-                        if let Ok(_) = channel.send(&bytes.clone().into()).await {
+            // Host Video Capture Loop (real DXGI desktop capture -> JPEG).
+            //
+            // The DXGI capture object holds COM interface pointers that are not
+            // safe to hold across .await points, so the capture + encode runs on a
+            // dedicated blocking thread. Encoded JPEG frames are forwarded to an
+            // async task over a std::sync::mpsc channel, which performs the actual
+            // WebRTC data-channel send.
+            if let Some(channel) = vc {
+                // Async sender: receives finished JPEG frames and ships them.
+                let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+                tokio::spawn(async move {
+                    while let Some(bytes) = frame_rx.recv().await {
+                        if channel.send(&bytes.clone().into()).await.is_ok() {
                             BYTES_SENT.fetch_add(bytes.len(), Ordering::Relaxed);
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(33)).await;
                     }
-                }
-            });
+                });
+
+                // Blocking capture + encode thread.
+                tokio::task::spawn_blocking(move || {
+                    // Give the data channel a moment to open before streaming.
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+
+                    tracing::info!(
+                        "Initializing DXGI Desktop Duplication API for live capture..."
+                    );
+
+                    #[cfg(target_os = "windows")]
+                    {
+                        use screen_capture::{PixelFormat, ScreenCapture};
+
+                        match screen_capture::dxgi::WindowsScreenCapture::new(0, 0) {
+                            Ok(mut capture) => {
+                                let (w, h) = capture.resolution();
+                                tracing::info!("DXGI capture active at {}x{}", w, h);
+
+                                loop {
+                                    // Apply any pending monitor-switch request (take the latest).
+                                    let mut target: Option<u32> = None;
+                                    while let Ok(idx) = switch_rx.try_recv() {
+                                        target = Some(idx);
+                                    }
+                                    if let Some(idx) = target {
+                                        tracing::info!("Switching DXGI capture to monitor {}", idx);
+                                        if let Err(e) = capture.switch_monitor(idx) {
+                                            tracing::warn!("switch_monitor failed: {}", e);
+                                        }
+                                    }
+
+                                    match capture.capture_frame() {
+                                        Ok(frame) => {
+                                            if let Some(jpeg) = encode_frame_to_jpeg(
+                                                &frame.data,
+                                                frame.width,
+                                                frame.height,
+                                                frame.pixel_format,
+                                            ) {
+                                                if frame_tx.blocking_send(jpeg).is_err() {
+                                                    break; // receiver gone -> session ended
+                                                }
+                                            }
+                                        }
+                                        Err(screen_capture::error::CaptureError::Timeout) => {
+                                            // No new frame within the timeout window; the screen
+                                            // is static. Nothing to send, just continue.
+                                        }
+                                        Err(screen_capture::error::CaptureError::DisplayChanged) => {
+                                            tracing::warn!(
+                                                "Display changed; re-initializing DXGI capture."
+                                            );
+                                            if let Ok(fresh) =
+                                                screen_capture::dxgi::WindowsScreenCapture::new(0, 0)
+                                            {
+                                                capture = fresh;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Capture error: {}", e);
+                                            std::thread::sleep(std::time::Duration::from_millis(100));
+                                        }
+                                    }
+
+                                    // Cap at ~30 FPS; DXGI only returns changed frames so this is
+                                    // an upper bound, not a busy loop.
+                                    std::thread::sleep(std::time::Duration::from_millis(33));
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Native DXGI capture failed ({}). Falling back to mock generator.",
+                                    e
+                                );
+                                run_mock_capture(frame_tx, switch_rx);
+                            }
+                        }
+
+                        // Suppress unused warning when PixelFormat path is compiled.
+                        let _ = PixelFormat::Bgra8;
+                    }
+
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        tracing::warn!(
+                            "Non-Windows build: DXGI unavailable, using mock generator."
+                        );
+                        run_mock_capture(frame_tx, switch_rx);
+                    }
+                });
+            }
 
             let offer = webrtc::peer_connection::sdp::session_description::RTCSessionDescription::offer(sdp).unwrap();
             if let Ok(_) = transport.peer_connection.set_remote_description(offer).await {

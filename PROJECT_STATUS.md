@@ -40,9 +40,11 @@ All 25 phases have been completed. The project has reached its final milestone.
 
 - **Environment**: The Rust `msvc` toolchain is installed, but the Windows C++ Build Tools (providing `link.exe`) are missing on the host, causing native `cargo build` to fail.
 - **Observation & Workaround**: To overcome this limitation, we successfully shifted the entire build pipeline to **WSL (Windows Subsystem for Linux)**. We utilized cross-compilation via the GNU toolchain (`x86_64-pc-windows-gnu`) to bypass the MSVC dependency entirely. We consistently ran builds using:
+
   ```bash
   wsl bash -c "cd '/mnt/d/.../remote-control' && CARGO_TARGET_DIR=/tmp/target-wsl ~/.cargo/bin/cargo build --target x86_64-pc-windows-gnu"
   ```
+
   By moving the `CARGO_TARGET_DIR` to `/tmp/target-wsl` within the native Linux filesystem, we also circumvented NTFS cross-OS file locking/performance issues, enabling rapid iteration and ensuring all phases (1 through 11) successfully compiled into runnable Windows executables without requiring Administrator privileges to install Visual Studio.
 
 ## Environment Notes

@@ -35,6 +35,43 @@ export function ActiveSession({
   const [clipboardCopied, setClipboardCopied] = useState(false);
   
   const toolbarTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+
+  // Map a viewport cursor position to normalized 0..65535 absolute coordinates
+  // over the remote desktop, accounting for `object-contain` letterboxing of the
+  // streamed <img>. Returns null when the cursor is outside the visible video
+  // content area (i.e. over the black letterbox bars), so we don't inject
+  // off-screen moves.
+  const toRemoteCoords = (clientX: number, clientY: number): { x: number; y: number } | null => {
+    const img = imgRef.current;
+    if (!img) return null;
+
+    const rect = img.getBoundingClientRect();
+    const natW = img.naturalWidth || rect.width;
+    const natH = img.naturalHeight || rect.height;
+    if (natW === 0 || natH === 0 || rect.width === 0 || rect.height === 0) return null;
+
+    // Compute the displayed content rectangle inside the element for object-contain:
+    // the image is scaled uniformly to fit, then centered.
+    const scale = Math.min(rect.width / natW, rect.height / natH);
+    const dispW = natW * scale;
+    const dispH = natH * scale;
+    const offsetX = rect.left + (rect.width - dispW) / 2;
+    const offsetY = rect.top + (rect.height - dispH) / 2;
+
+    const relX = clientX - offsetX;
+    const relY = clientY - offsetY;
+
+    // Outside the actual video content -> ignore.
+    if (relX < 0 || relY < 0 || relX > dispW || relY > dispH) return null;
+
+    const normX = Math.round((relX / dispW) * 65535);
+    const normY = Math.round((relY / dispH) * 65535);
+    return {
+      x: Math.max(0, Math.min(65535, normX)),
+      y: Math.max(0, Math.min(65535, normY)),
+    };
+  };
 
   // Auto-hide toolbar on mouse inactivity
   const handleUserActivity = () => {
@@ -63,8 +100,10 @@ export function ActiveSession({
 
     const handleMouseMove = (e: MouseEvent) => {
       handleUserActivity();
-      invoke("send_input_event", { 
-        event: { MouseMove: { x: Math.floor(e.clientX), y: Math.floor(e.clientY) } } 
+      const coords = toRemoteCoords(e.clientX, e.clientY);
+      if (!coords) return;
+      invoke("send_input_event", {
+        event: { MouseMove: { x: coords.x, y: coords.y } }
       }).catch(() => {}); // silent catch for high frequency mouse stream
     };
 
@@ -96,6 +135,18 @@ export function ActiveSession({
       }).catch(console.error);
     };
 
+    const handleWheel = (e: WheelEvent) => {
+      handleUserActivity();
+      // Normalize wheel deltas to notch counts. deltaY > 0 means scrolling down,
+      // which corresponds to a negative wheel delta on Windows.
+      const dy = e.deltaY > 0 ? -1 : e.deltaY < 0 ? 1 : 0;
+      const dx = e.deltaX > 0 ? 1 : e.deltaX < 0 ? -1 : 0;
+      if (dx === 0 && dy === 0) return;
+      invoke("send_input_event", {
+        event: { Scroll: { delta_x: dx, delta_y: dy } }
+      }).catch(() => {});
+    };
+
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
@@ -105,6 +156,7 @@ export function ActiveSession({
     window.addEventListener("mouseup", handleMouseUp);
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("wheel", handleWheel, { passive: true });
     document.addEventListener("fullscreenchange", handleFullscreenChange);
 
     return () => {
@@ -114,6 +166,7 @@ export function ActiveSession({
       window.removeEventListener("mouseup", handleMouseUp);
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("wheel", handleWheel);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
     };
   }, []);
@@ -162,6 +215,7 @@ export function ActiveSession({
       {/* Video Streaming Canvas */}
       <div className={`w-full h-full flex items-center justify-center transition-opacity duration-500 ${connectionState !== "connected" ? "opacity-30 blur-sm" : "opacity-100"}`}>
         <img 
+          ref={imgRef}
           src={streamUrl} 
           className="w-full h-full object-contain pointer-events-none" 
           alt={`Video Stream from ${deviceId}`} 
