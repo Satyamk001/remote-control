@@ -146,15 +146,22 @@ struct AppSession {
     auto_accept: tokio::sync::RwLock<bool>,
 }
 
+/// Signaling client state. Managed synchronously at startup (as `None`) so
+/// commands never hit Tauri's "state not managed" panic if invoked before the
+/// background WebSocket connect finishes. The connect task fills in the client.
+type SignalingState = std::sync::Arc<tokio::sync::RwLock<Option<networking::signaling::SignalingClient>>>;
+
 #[tauri::command]
-async fn get_devices(client: tauri::State<'_, Option<networking::signaling::SignalingClient>>) -> Result<Vec<serde_json::Value>, String> {
-    if let Some(c) = client.inner() {
+async fn get_devices(client: tauri::State<'_, SignalingState>) -> Result<Vec<serde_json::Value>, String> {
+    let guard = client.read().await;
+    if let Some(c) = guard.as_ref() {
         c.request_hosts_update().await;
         // Give it a tiny bit of time to fetch
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let hosts = c.hosts.read().await;
         let mut devices = Vec::new();
         for (i, host) in hosts.iter().enumerate() {
+            let _ = i;
             devices.push(serde_json::json!({
                 "id": host.device_id, // we use deviceId as the connection ID for the UI
                 "session_id": host.session_id,
@@ -222,11 +229,12 @@ fn report_decode_latency(micros: u32) -> Result<(), String> {
 #[tauri::command]
 async fn connect_to_device(
     id: String, 
-    client: tauri::State<'_, Option<networking::signaling::SignalingClient>>,
+    client: tauri::State<'_, SignalingState>,
     session: tauri::State<'_, AppSession>
 ) -> Result<serde_json::Value, String> {
     info!("Connecting to device: {}", id);
-    let c = client.inner().as_ref().ok_or("No signaling client")?;
+    let c = client.read().await.clone().ok_or("No signaling client")?;
+    let c = &c;
     
     // Find session_id from id (device_id)
     let hosts = c.hosts.read().await;
@@ -520,7 +528,7 @@ async fn get_auto_accept(session: tauri::State<'_, AppSession>) -> Result<bool, 
 async fn approve_connection(
     allowed: bool, 
     session: tauri::State<'_, AppSession>,
-    client: tauri::State<'_, Option<networking::signaling::SignalingClient>>
+    client: tauri::State<'_, SignalingState>
 ) -> Result<(), String> {
     info!("Host connection approval: {}", allowed);
     if !allowed {
@@ -531,7 +539,7 @@ async fn approve_connection(
 
     let offer_data = session.pending_offer.write().await.take();
     if let Some((session_id, sdp)) = offer_data {
-        let c = client.inner().as_ref().unwrap().clone();
+        let c = client.read().await.clone().ok_or("No signaling client")?;
         process_offer_internal(session.inner(), c, session_id, sdp).await?;
     }
     
@@ -952,6 +960,10 @@ fn main() {
                 pending_ice: tokio::sync::RwLock::new(Vec::new()),
                 auto_accept: tokio::sync::RwLock::new(false),
             });
+            // Manage the signaling state up front (as None) so commands never
+            // panic on unmanaged state before the connect task completes.
+            let signaling_state: SignalingState = std::sync::Arc::new(tokio::sync::RwLock::new(None));
+            app.manage(signaling_state.clone());
             
             // Start Telemetry Loop
             tauri::async_runtime::spawn(async move {
@@ -978,6 +990,7 @@ fn main() {
             let signaling_url = std::env::var("REMOTE_CONTROL_SIGNALING_URL")
                 .unwrap_or_else(|_| "wss://remote-control-y1jb.onrender.com".to_string());
             let app_handle = app.handle();
+            let signaling_state_bg = signaling_state.clone();
             tauri::async_runtime::spawn(async move {
                 match networking::signaling::SignalingClient::connect(&signaling_url, &device_id_hex).await {
                     Ok(client) => {
@@ -1030,11 +1043,11 @@ fn main() {
                             }
                         });
 
-                        app_handle.manage(Some(client));
+                        *signaling_state_bg.write().await = Some(client);
                     }
                     Err(e) => {
                         error!("Failed to connect to signaling server: {}", e);
-                        app_handle.manage(None::<networking::signaling::SignalingClient>);
+                        // Leave the managed state as None; commands handle it.
                     }
                 }
             });
