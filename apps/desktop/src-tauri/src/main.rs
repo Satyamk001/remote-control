@@ -942,11 +942,49 @@ async fn terminate_host_session(session: tauri::State<'_, AppSession>) -> Result
 }
 
 fn main() {
-    tracing_subscriber::fmt::init();
-    
+    // Logging: write to BOTH stdout (visible when launched from a console in
+    // debug builds) and a log file. The release build uses the Windows GUI
+    // subsystem (no console), so the file is the reliable way to read logs.
+    //
+    // Log location: <REMOTE_CONTROL_DATA_DIR or %TEMP%>/remote-control.log
+    let log_dir = std::env::var("REMOTE_CONTROL_DATA_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join("remote-control.log");
+
+    match std::fs::File::create(&log_path) {
+        Ok(file) => {
+            // File layer (no ANSI). We log the path to stdout too, in case a
+            // console is attached.
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+            tracing::info!("Logging to {}", log_path.display());
+        }
+        Err(_) => {
+            // Fall back to stdout-only if the file can't be created.
+            tracing_subscriber::fmt::init();
+        }
+    }
+
     tauri::Builder::default()
         .setup(|app| {
-            let app_data_dir = app.path_resolver().app_data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+            // Data directory holds the persistent device identity (identity.key)
+            // and other per-install state. It can be overridden with
+            // REMOTE_CONTROL_DATA_DIR so a SECOND instance on the same machine
+            // gets its own Device ID — required for the single-PC loopback
+            // self-test (one instance as host, one as viewer).
+            let app_data_dir = match std::env::var("REMOTE_CONTROL_DATA_DIR") {
+                Ok(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+                _ => app
+                    .path_resolver()
+                    .app_data_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from(".")),
+            };
             if !app_data_dir.exists() {
                 std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data directory");
             }

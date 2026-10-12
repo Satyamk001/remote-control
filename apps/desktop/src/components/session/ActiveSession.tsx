@@ -36,6 +36,10 @@ export function ActiveSession({
   const [monitorIndex, setMonitorIndex] = useState(0);
   const [showToolbar, setShowToolbar] = useState(true);
   const [clipboardCopied, setClipboardCopied] = useState(false);
+  // Visible diagnostic of the video decode pipeline so a black canvas is
+  // explainable without devtools. Cleared once the first frame paints.
+  const [videoStatus, setVideoStatus] = useState<string>("Waiting for video…");
+  const [firstFramePainted, setFirstFramePainted] = useState(false);
   
   const toolbarTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -93,6 +97,7 @@ export function ActiveSession({
     const AnyWin = window as any;
     if (typeof AnyWin.VideoDecoder === "undefined") {
       console.error("WebCodecs VideoDecoder unavailable in this runtime.");
+      setVideoStatus("WebCodecs VideoDecoder unavailable in this WebView.");
       return;
     }
 
@@ -118,6 +123,7 @@ export function ActiveSession({
         }
         videoSizeRef.current = { w, h };
         if (ctx) ctx.drawImage(frame, 0, 0);
+        if (!firstFramePainted) setFirstFramePainted(true);
 
         // Report decode latency at most once per second.
         const nowMs = performance.now();
@@ -135,15 +141,21 @@ export function ActiveSession({
       if (decoder) return;
       decoder = new AnyWin.VideoDecoder({
         output: paint,
-        error: (e: any) => console.error("VideoDecoder error:", e),
+        error: (e: any) => {
+          console.error("VideoDecoder error:", e);
+          setVideoStatus("Decoder error: " + (e?.message || e));
+        },
       });
     };
 
     const run = async () => {
       try {
+        setVideoStatus("Connecting to video stream…");
         const resp = await fetch(streamUrl, { signal: abort.signal });
-        if (!resp.body) return;
+        if (!resp.body) { setVideoStatus("Video stream has no body."); return; }
         const reader = resp.body.getReader();
+        let totalBytes = 0;
+        let sawFirstKey = false;
 
         // Rolling buffer across chunk boundaries.
         let buffer = new Uint8Array(0);
@@ -157,7 +169,9 @@ export function ActiveSession({
         while (!cancelled) {
           const { done, value } = await reader.read();
           if (done) break;
-          if (value) append(value);
+          if (value) { append(value); totalBytes += value.length;
+            if (!sawFirstKey) setVideoStatus(`Receiving stream (${totalBytes} bytes), waiting for keyframe…`);
+          }
 
           // Parse as many complete [flag][len][payload] units as available.
           while (buffer.length >= 5) {
@@ -179,11 +193,19 @@ export function ActiveSession({
             // the decoder reads actual params from the in-band SPS/PPS.
             if (!configured) {
               if (!isKey) continue; // must start at a keyframe
-              decoder.configure({
-                codec: "avc1.42e01f",
-                optimizeForLatency: true,
-              });
-              configured = true;
+              sawFirstKey = true;
+              try {
+                decoder.configure({
+                  codec: "avc1.42e01f",
+                  optimizeForLatency: true,
+                });
+                configured = true;
+                setVideoStatus("Keyframe received, decoding…");
+              } catch (e: any) {
+                console.error("configure() failed:", e);
+                setVideoStatus("Decoder configure failed: " + (e?.message || e));
+                return;
+              }
             }
 
             try {
@@ -199,8 +221,11 @@ export function ActiveSession({
             }
           }
         }
-      } catch (e) {
-        if (!cancelled) console.error("H.264 stream error:", e);
+      } catch (e: any) {
+        if (!cancelled) {
+          console.error("H.264 stream error:", e);
+          setVideoStatus("Stream error: " + (e?.message || e));
+        }
       }
     };
 
@@ -487,6 +512,16 @@ export function ActiveSession({
           aria-label={`Video Stream from ${deviceId}`}
         />
       </div>
+
+      {/* Video pipeline status (hidden once the first frame paints) */}
+      {!firstFramePainted && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
+          <div className="bg-black/70 border border-border/50 rounded-lg px-4 py-3 text-center max-w-md">
+            <p className="text-sm font-mono text-amber-300">{videoStatus}</p>
+            <p className="text-[10px] text-muted-foreground mt-1">Video pipeline diagnostic</p>
+          </div>
+        </div>
+      )}
 
       {/* Top Floating Status Pill */}
       <div className="absolute top-4 right-4 z-40 flex items-center gap-2 pointer-events-auto">

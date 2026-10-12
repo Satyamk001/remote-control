@@ -29,13 +29,17 @@ To rebuild after code changes (from WSL, per the project's cross-compile setup):
 # Frontend bundle
 cd "apps/desktop" && npm run build
 
-# Windows release binary (picks up all crates)
+# Windows release binary (picks up all crates).
+# NOTE: --features custom-protocol is REQUIRED. Without it, Tauri does NOT embed
+# the built frontend and instead loads devPath (http://localhost:5173) at
+# runtime — so the window shows a blank page or whatever is on port 5173.
 cd "<repo root>"
 CARGO_TARGET_DIR=/tmp/target-wsl ~/.cargo/bin/cargo build --release \
+  --features custom-protocol \
   --target x86_64-pc-windows-gnu \
   --manifest-path "apps/desktop/src-tauri/Cargo.toml"
 
-# Copy out
+# Copy out (close any running instance first, or the copy is denied/locked)
 cp /tmp/target-wsl/x86_64-pc-windows-gnu/release/desktop.exe \
    "release_build/Remote Control.exe"
 ```

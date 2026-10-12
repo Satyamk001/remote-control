@@ -17,8 +17,10 @@ npm run build
 
 echo "2. Building Rust Backend (Release Mode) in WSL..."
 cd "${WORKSPACE_DIR}"
-# Build Tauri application targeting windows-gnu in release mode
-CARGO_TARGET_DIR=/tmp/target-wsl ~/.cargo/bin/cargo build --release --target x86_64-pc-windows-gnu --manifest-path "${APP_DIR}/src-tauri/Cargo.toml"
+# Build Tauri application targeting windows-gnu in release mode.
+# --features custom-protocol is REQUIRED so Tauri embeds the built frontend
+# instead of loading devPath (http://localhost:5173) at runtime.
+CARGO_TARGET_DIR=/tmp/target-wsl ~/.cargo/bin/cargo build --release --features custom-protocol --target x86_64-pc-windows-gnu --manifest-path "${APP_DIR}/src-tauri/Cargo.toml"
 
 echo "3. Assembling Portable Release..."
 mkdir -p "${RELEASE_ZIP_DIR}"
