@@ -15,6 +15,8 @@ static BYTES_SENT: AtomicUsize = AtomicUsize::new(0);
 static BYTES_RECEIVED: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_BITRATE: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_LATENCY: AtomicUsize = AtomicUsize::new(42);
+/// Viewer-controlled audio mute. When true, the host stops shipping audio PCM.
+static AUDIO_MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub enum DataPacket {
@@ -27,6 +29,8 @@ pub enum DataPacket {
     Ping { nonce: u64, ts_micros: u64 },
     /// Echo of a `Ping`, sent by the viewer, carrying the original fields back.
     Pong { nonce: u64, ts_micros: u64 },
+    /// Viewer -> host: mute/unmute system audio capture.
+    ToggleAudio { muted: bool },
 }
 
 /// Monotonic-ish timestamp in microseconds since the UNIX epoch, used for RTT.
@@ -171,7 +175,7 @@ async fn connect_to_device(
     id: String, 
     client: tauri::State<'_, Option<networking::signaling::SignalingClient>>,
     session: tauri::State<'_, AppSession>
-) -> Result<String, String> {
+) -> Result<serde_json::Value, String> {
     info!("Connecting to device: {}", id);
     let c = client.inner().as_ref().ok_or("No signaling client")?;
     
@@ -188,6 +192,7 @@ async fn connect_to_device(
     let (ice_tx, mut ice_rx) = tokio::sync::mpsc::channel::<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>(32);
     let (data_tx, mut data_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
     let (video_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
+    let (audio_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(64);
     
     let c_clone = c.clone();
     let sid = session_id.clone();
@@ -198,7 +203,7 @@ async fn connect_to_device(
         }
     });
 
-    let transport = webrtc_lib::transport::WebRtcTransport::new(false, ice_tx, data_tx, video_tx.clone()).await.map_err(|e| e.to_string())?;
+    let transport = webrtc_lib::transport::WebRtcTransport::new(false, ice_tx, data_tx, video_tx.clone(), audio_tx.clone()).await.map_err(|e| e.to_string())?;
     
     // Client Data Loop
     let dc = transport.data_channel.clone();
@@ -282,12 +287,44 @@ async fn connect_to_device(
         }
     });
 
+    // Spawn the audio PCM loopback server for the viewer.
+    //
+    // The audio channel delivers raw interleaved stereo f32 LE PCM samples
+    // (48kHz, see the host audio loop). We relay them over a long-lived HTTP
+    // response; the frontend reads the body as a stream and plays it via the
+    // Web Audio API.
+    let audio_listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
+    let audio_addr = audio_listener.local_addr().map_err(|e| e.to_string())?;
+    let audio_url = format!("http://{}/audio", audio_addr);
+
+    tokio::spawn(async move {
+        loop {
+            if let Ok((mut socket, _)) = audio_listener.accept().await {
+                let mut rx = audio_tx.subscribe();
+                tokio::spawn(async move {
+                    let mut buf = [0; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+                    if socket.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    while let Ok(chunk) = rx.recv().await {
+                        if socket.write_all(&chunk).await.is_err() {
+                            break;
+                        }
+                        BYTES_RECEIVED.fetch_add(chunk.len(), Ordering::Relaxed);
+                    }
+                });
+            }
+        }
+    });
+
     if let Ok(offer) = transport.peer_connection.create_offer(None).await {
         if let Ok(_) = transport.peer_connection.set_local_description(offer.clone()).await {
             c.send_sdp_offer(&session_id, &offer.sdp).await;
             
             *session.webrtc.write().await = Some(std::sync::Arc::new(transport));
-            return Ok(stream_url);
+            return Ok(serde_json::json!({ "video": stream_url, "audio": audio_url }));
         }
     }
     
@@ -295,8 +332,19 @@ async fn connect_to_device(
 }
 
 #[tauri::command]
-async fn switch_monitor(index: u8, session: tauri::State<'_, AppSession>) -> Result<(), String> {
-    info!("Switching monitor to {}", index);
+async fn toggle_audio(muted: bool, session: tauri::State<'_, AppSession>) -> Result<(), String> {
+    let packet = DataPacket::ToggleAudio { muted };
+    let bytes = bincode::serialize(&packet).map_err(|e| e.to_string())?;
+    if let Some(transport) = session.webrtc.read().await.as_ref() {
+        if let Some(dc) = &transport.data_channel {
+            let _ = dc.send(&bytes.into()).await;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn switch_monitor(index: u8, session: tauri::State<'_, AppSession>) -> Result<(), String> {    info!("Switching monitor to {}", index);
     let packet = DataPacket::SwitchMonitor(index);
     let bytes = bincode::serialize(&packet).map_err(|e| e.to_string())?;
     
@@ -399,6 +447,7 @@ async fn process_offer_internal(
         let (ice_tx, mut ice_rx) = tokio::sync::mpsc::channel::<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>(32);
         let (data_tx, mut data_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
         let (video_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
+        let (audio_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(64);
         
         let c_clone = c.clone();
         let sid = session_id.clone();
@@ -409,8 +458,9 @@ async fn process_offer_internal(
             }
         });
         
-        if let Ok(transport) = webrtc_lib::transport::WebRtcTransport::new(true, ice_tx, data_tx, video_tx).await {
+        if let Ok(transport) = webrtc_lib::transport::WebRtcTransport::new(true, ice_tx, data_tx, video_tx, audio_tx).await {
             let vc = transport.video_channel.clone();
+            let ac = transport.audio_channel.clone();
 
             // Channel used to forward monitor-switch requests from the data loop
             // to the (blocking) capture loop. std::sync::mpsc so it can be polled
@@ -457,6 +507,10 @@ async fn process_offer_internal(
                                         info!("Host received Disconnect packet, closing session.");
                                         let _ = pc.close().await;
                                         break;
+                                    }
+                                    DataPacket::ToggleAudio { muted } => {
+                                        info!("Host received ToggleAudio(muted={})", muted);
+                                        AUDIO_MUTED.store(muted, Ordering::Relaxed);
                                     }
                                     DataPacket::Ping { .. } => { /* host doesn't expect pings */ }
                                 }
@@ -612,6 +666,60 @@ async fn process_offer_internal(
                             "Non-Windows build: DXGI unavailable, using mock generator."
                         );
                         run_mock_capture(frame_tx, switch_rx);
+                    }
+                });
+            }
+
+            // Host Audio Capture Loop (WASAPI loopback PCM -> audio channel).
+            //
+            // cpal's Stream is not Send, so capture lives on a dedicated blocking
+            // thread that polls the lock-free ring buffer and forwards raw
+            // interleaved stereo f32 LE PCM to an async task for the actual send.
+            if let Some(channel) = ac {
+                let (pcm_tx, mut pcm_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+                tokio::spawn(async move {
+                    while let Some(bytes) = pcm_rx.recv().await {
+                        if channel.send(&bytes.clone().into()).await.is_ok() {
+                            BYTES_SENT.fetch_add(bytes.len(), Ordering::Relaxed);
+                        }
+                    }
+                });
+
+                tokio::task::spawn_blocking(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    match remote_core::audio::AudioCapture::new() {
+                        Ok(mut capture) => {
+                            tracing::info!("WASAPI loopback audio capture active.");
+                            let mut scratch = vec![0f32; 4096];
+                            loop {
+                                // Drop audio while muted to honor the viewer toggle
+                                // and the permission model.
+                                if AUDIO_MUTED.load(Ordering::Relaxed) {
+                                    // Keep the ring from overflowing while muted.
+                                    while capture.consumer.pop().is_some() {}
+                                    std::thread::sleep(std::time::Duration::from_millis(20));
+                                    continue;
+                                }
+
+                                let n = capture.consumer.pop_slice(&mut scratch);
+                                if n == 0 {
+                                    std::thread::sleep(std::time::Duration::from_millis(5));
+                                    continue;
+                                }
+
+                                // Serialize f32 samples as little-endian bytes.
+                                let mut bytes = Vec::with_capacity(n * 4);
+                                for &s in &scratch[..n] {
+                                    bytes.extend_from_slice(&s.to_le_bytes());
+                                }
+                                if pcm_tx.blocking_send(bytes).is_err() {
+                                    break; // viewer gone -> session ended
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Audio capture unavailable: {}", e);
+                        }
                     }
                 });
             }
@@ -781,6 +889,7 @@ fn main() {
             connect_to_device,
             switch_monitor,
             send_input_event,
+            toggle_audio,
             get_local_device_id,
             get_host_session_status,
             approve_connection,

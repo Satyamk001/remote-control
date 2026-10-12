@@ -20,10 +20,12 @@ import { motion, AnimatePresence } from "framer-motion";
 export function ActiveSession({ 
   deviceId, 
   streamUrl, 
+  audioUrl,
   onDisconnect 
 }: { 
   deviceId: string; 
   streamUrl: string; 
+  audioUrl: string;
   onDisconnect: () => void; 
 }) {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -38,6 +40,8 @@ export function ActiveSession({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // Intrinsic resolution of the decoded remote frames, updated as frames arrive.
   const videoSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+  // Mirrors isAudioMuted for the long-lived audio effect to read live.
+  const mutedRef = useRef<boolean>(false);
 
   // Map a viewport cursor position to normalized 0..65535 absolute coordinates
   // over the remote desktop, accounting for `object-contain` letterboxing of the
@@ -197,6 +201,88 @@ export function ActiveSession({
     };
   }, [streamUrl]);
 
+  // Web Audio playback of the host's system audio.
+  //
+  // The host streams raw interleaved stereo f32 LE PCM at 48kHz over `audioUrl`.
+  // We read the body as a stream, split samples into left/right channels, and
+  // schedule small AudioBuffers back-to-back for gapless playback. Muting is
+  // handled host-side (it stops sending) AND locally here as a fast path.
+  useEffect(() => {
+    if (!audioUrl) return;
+    const SAMPLE_RATE = 48000;
+    const CHANNELS = 2;
+
+    let cancelled = false;
+    const abort = new AbortController();
+    const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) {
+      console.error("Web Audio API unavailable.");
+      return;
+    }
+    const audioCtx = new AudioCtx({ sampleRate: SAMPLE_RATE });
+    let playHead = audioCtx.currentTime;
+
+    const schedule = (interleaved: Float32Array) => {
+      if (mutedRef.current) return;
+      const frames = Math.floor(interleaved.length / CHANNELS);
+      if (frames === 0) return;
+      const buffer = audioCtx.createBuffer(CHANNELS, frames, SAMPLE_RATE);
+      for (let ch = 0; ch < CHANNELS; ch++) {
+        const out = buffer.getChannelData(ch);
+        for (let i = 0; i < frames; i++) out[i] = interleaved[i * CHANNELS + ch];
+      }
+      const src = audioCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(audioCtx.destination);
+      // Avoid scheduling in the past if we fell behind.
+      const now = audioCtx.currentTime;
+      if (playHead < now) playHead = now;
+      src.start(playHead);
+      playHead += buffer.duration;
+    };
+
+    const run = async () => {
+      try {
+        const resp = await fetch(audioUrl, { signal: abort.signal });
+        if (!resp.body) return;
+        const reader = resp.body.getReader();
+
+        // Carry leftover bytes that don't complete a 4-byte f32 sample / frame.
+        let leftover = new Uint8Array(0);
+        const frameBytes = 4 * CHANNELS; // one stereo frame
+
+        while (!cancelled) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+
+          const merged = new Uint8Array(leftover.length + value.length);
+          merged.set(leftover, 0);
+          merged.set(value, leftover.length);
+
+          const usable = merged.length - (merged.length % frameBytes);
+          if (usable > 0) {
+            // Copy to an aligned buffer so Float32Array view is valid.
+            const slice = merged.slice(0, usable);
+            const floats = new Float32Array(slice.buffer, slice.byteOffset, usable / 4);
+            schedule(floats);
+          }
+          leftover = merged.slice(usable);
+        }
+      } catch (e) {
+        if (!cancelled) console.error("Audio stream error:", e);
+      }
+    };
+
+    run();
+
+    return () => {
+      cancelled = true;
+      abort.abort();
+      audioCtx.close().catch(() => {});
+    };
+  }, [audioUrl]);
+
   // Auto-hide toolbar on mouse inactivity
   const handleUserActivity = () => {
     setShowToolbar(true);
@@ -302,8 +388,10 @@ export function ActiveSession({
   };
 
   const handleToggleAudio = () => {
-    setIsAudioMuted(!isAudioMuted);
-    invoke("toggle_audio", { muted: !isAudioMuted }).catch(console.error);
+    const next = !isAudioMuted;
+    setIsAudioMuted(next);
+    mutedRef.current = next;
+    invoke("toggle_audio", { muted: next }).catch(console.error);
   };
 
   const handleToggleFullscreen = () => {

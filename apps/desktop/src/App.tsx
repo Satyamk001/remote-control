@@ -16,13 +16,15 @@ function App() {
   const [activeTab, setActiveTab] = useState<"client" | "host">("client");
   const [activeSession, setActiveSession] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string>("");
+  const [audioUrl, setAudioUrl] = useState<string>("");
   const [connecting, setConnecting] = useState(false);
 
   const handleConnect = async (deviceId: string) => {
     setConnecting(true);
     try {
-      const url = await invoke<string>("connect_to_device", { id: deviceId });
-      setStreamUrl(url);
+      const res = await invoke<{ video: string; audio: string }>("connect_to_device", { id: deviceId });
+      setStreamUrl(res.video);
+      setAudioUrl(res.audio);
       setActiveSession(deviceId);
     } catch (e) {
       console.error(e);
@@ -33,7 +35,7 @@ function App() {
   };
 
   if (activeSession) {
-    return <ActiveSession deviceId={activeSession} streamUrl={streamUrl} onDisconnect={() => setActiveSession(null)} />;
+    return <ActiveSession deviceId={activeSession} streamUrl={streamUrl} audioUrl={audioUrl} onDisconnect={() => setActiveSession(null)} />;
   }
 
   return (

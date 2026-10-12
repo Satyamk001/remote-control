@@ -18,6 +18,7 @@ use tracing::{info, error};
 pub struct WebRtcTransport {
     pub peer_connection: Arc<RTCPeerConnection>,
     pub video_channel: Option<Arc<RTCDataChannel>>,
+    pub audio_channel: Option<Arc<RTCDataChannel>>,
     pub data_channel: Option<Arc<RTCDataChannel>>,
 }
 
@@ -26,7 +27,8 @@ impl WebRtcTransport {
         is_host: bool, 
         ice_tx: mpsc::Sender<RTCIceCandidateInit>,
         data_tx: mpsc::Sender<Vec<u8>>,
-        video_tx: tokio::sync::broadcast::Sender<Vec<u8>>
+        video_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+        audio_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     ) -> Result<Self, WebRtcError> {
         let mut media_engine = MediaEngine::default();
         media_engine.register_default_codecs().map_err(|e| WebRtcError::SdkError(e.to_string()))?;
@@ -120,10 +122,21 @@ impl WebRtcTransport {
         let data_channel = peer_connection.create_data_channel("input-events", Some(input_opts)).await
             .map_err(|e| WebRtcError::SdkError(e.to_string()))?;
 
+        let mut audio_opts = webrtc::data_channel::data_channel_init::RTCDataChannelInit::default();
+        audio_opts.negotiated = Some(3);
+        let audio_channel = peer_connection.create_data_channel("audio-stream", Some(audio_opts)).await
+            .map_err(|e| WebRtcError::SdkError(e.to_string()))?;
+
         if !is_host {
             let vtx = video_tx.clone();
             video_channel.on_message(Box::new(move |msg| {
                 let _ = vtx.send(msg.data.to_vec());
+                Box::pin(async {})
+            }));
+
+            let atx = audio_tx.clone();
+            audio_channel.on_message(Box::new(move |msg| {
+                let _ = atx.send(msg.data.to_vec());
                 Box::pin(async {})
             }));
         }
@@ -140,6 +153,7 @@ impl WebRtcTransport {
         let transport = Self {
             peer_connection,
             video_channel: Some(video_channel),
+            audio_channel: Some(audio_channel),
             data_channel: Some(data_channel),
         };
 
