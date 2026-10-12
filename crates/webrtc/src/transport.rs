@@ -82,11 +82,25 @@ impl WebRtcTransport {
         let peer_connection = Arc::new(api.new_peer_connection(config).await
             .map_err(|e| WebRtcError::SdkError(e.to_string()))?);
             
-        // Monitor state
+        // Monitor state. Track whether we ever connected so we can tell a true
+        // NAT-traversal failure (never connected) apart from a normal teardown
+        // (connected, then the peer sent Close Notify / disconnected).
+        let ever_connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ever_connected_cb = ever_connected.clone();
         peer_connection.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
             info!("Peer Connection State has changed: {}", s);
-            if s == RTCPeerConnectionState::Failed {
-                error!("Peer Connection has gone to failed state. P2P NAT Traversal may have failed.");
+            match s {
+                RTCPeerConnectionState::Connected => {
+                    ever_connected_cb.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                RTCPeerConnectionState::Failed => {
+                    if ever_connected_cb.load(std::sync::atomic::Ordering::Relaxed) {
+                        info!("Peer connection closed (session ended).");
+                    } else {
+                        error!("Peer Connection failed before connecting. P2P NAT Traversal may have failed; consider configuring a TURN relay.");
+                    }
+                }
+                _ => {}
             }
             Box::pin(async {})
         }));

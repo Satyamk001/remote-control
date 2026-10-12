@@ -19,6 +19,12 @@ function App() {
   const [audioUrl, setAudioUrl] = useState<string>("");
   const [connecting, setConnecting] = useState(false);
 
+  // Hosting (screen capture + input injection) is Windows-only. On Linux/macOS
+  // the machine can only be a viewer, so hide the Host Agent tab there to avoid
+  // the confusing "host sends a mock gradient" state.
+  const isWindows = /Windows|Win32|Win64|WOW64/i.test(navigator.userAgent);
+  const tabs = (isWindows ? ["client", "host"] : ["client"]) as Array<"client" | "host">;
+
   const handleConnect = async (deviceId: string) => {
     setConnecting(true);
     try {
@@ -47,7 +53,7 @@ function App() {
         </div>
         
         <nav className="flex flex-col space-y-1.5 relative">
-          {(["client", "host"] as const).map((tab) => {
+          {tabs.map((tab) => {
             const isActive = activeTab === tab;
             return (
               <button
@@ -95,10 +101,10 @@ function App() {
           </div>
         )}
         
-        {activeTab === "client" ? (
-          <Dashboard onConnect={handleConnect} />
-        ) : (
+        {activeTab === "host" && isWindows ? (
           <HostAgentPanel />
+        ) : (
+          <Dashboard onConnect={handleConnect} />
         )}
       </main>
     </div>
