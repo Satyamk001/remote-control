@@ -22,6 +22,33 @@ pub enum DataPacket {
     Clipboard(String),
     SwitchMonitor(u8),
     Disconnect,
+    /// Latency probe sent by the host. `nonce` round-trips so stale replies are
+    /// ignored; `ts_micros` is the host's send time (monotonic epoch micros).
+    Ping { nonce: u64, ts_micros: u64 },
+    /// Echo of a `Ping`, sent by the viewer, carrying the original fields back.
+    Pong { nonce: u64, ts_micros: u64 },
+}
+
+/// Monotonic-ish timestamp in microseconds since the UNIX epoch, used for RTT.
+fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+/// Pick a JPEG quality + inter-frame delay (ms) from the measured RTT.
+///
+/// Higher RTT => lower quality and lower frame rate, trading fidelity for
+/// responsiveness and bandwidth. Tuned around the project's existing 100ms
+/// throttle threshold (`remote-core::metrics`). Returns `(quality, frame_delay_ms)`.
+fn adaptive_params(rtt_ms: usize) -> (u8, u64) {
+    match rtt_ms {
+        0..=40 => (80, 16),   // great link: high quality, ~60 FPS cap
+        41..=100 => (70, 33), // normal: ~30 FPS
+        101..=200 => (55, 50), // congested: ~20 FPS
+        _ => (40, 100),        // poor: ~10 FPS, low quality
+    }
 }
 
 /// Convert a captured frame buffer into a JPEG image.
@@ -34,6 +61,7 @@ fn encode_frame_to_jpeg(
     width: u32,
     height: u32,
     format: screen_capture::PixelFormat,
+    quality: u8,
 ) -> Option<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
@@ -66,7 +94,7 @@ fn encode_frame_to_jpeg(
 
     let img: image::RgbImage = image::ImageBuffer::from_raw(width, height, rgb)?;
     let mut cursor = std::io::Cursor::new(Vec::new());
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 75)
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, quality)
         .encode_image(&img)
         .ok()?;
     Some(cursor.into_inner())
@@ -137,9 +165,11 @@ async fn get_devices(client: tauri::State<'_, Option<networking::signaling::Sign
 async fn get_diagnostics() -> Result<serde_json::Value, String> {
     let bitrate_kbps = CURRENT_BITRATE.load(Ordering::Relaxed);
     let latency_ms = CURRENT_LATENCY.load(Ordering::Relaxed);
+    let (_q, delay_ms) = adaptive_params(latency_ms);
+    let fps = if delay_ms > 0 { 1000 / delay_ms } else { 0 };
     
     Ok(serde_json::json!({
-        "fps": 30, // Locked to 30 FPS based on Host loop
+        "fps": fps, // adaptive, derived from live RTT
         "latency": format!("{}ms", latency_ms),
         "bitrate": format!("{:.2} Mbps", bitrate_kbps as f64 / 1000.0),
         "packetLoss": "0%" // SCTP DataChannels are reliable, so packet loss is handled at the protocol layer
@@ -193,6 +223,15 @@ async fn connect_to_device(
                             DataPacket::Clipboard(text) => {
                                 clip.set_text(&text);
                                 last_text = text;
+                            }
+                            DataPacket::Ping { nonce, ts_micros } => {
+                                // Echo immediately so the host can compute RTT.
+                                if let Some(channel) = &dc {
+                                    let pong = DataPacket::Pong { nonce, ts_micros };
+                                    if let Ok(bytes) = bincode::serialize(&pong) {
+                                        let _ = channel.send(&bytes.into()).await;
+                                    }
+                                }
                             }
                             _ => { info!("Client received packet: {:?}", packet); }
                         }
@@ -405,6 +444,7 @@ async fn process_offer_internal(
                 let injector = input::create_injector();
                 let mut clip = remote_core::clipboard::ClipboardManager::new();
                 let mut last_text = clip.get_text().unwrap_or_default();
+                let mut ping_nonce: u64 = 0;
                 
                 loop {
                     tokio::select! {
@@ -422,15 +462,34 @@ async fn process_offer_internal(
                                         info!("Host received SwitchMonitor({})", index);
                                         let _ = switch_tx.send(index as u32);
                                     }
+                                    DataPacket::Pong { ts_micros, .. } => {
+                                        // Round-trip time = now - original send time.
+                                        let rtt_us = now_micros().saturating_sub(ts_micros);
+                                        let rtt_ms = (rtt_us / 1000) as usize;
+                                        // Smooth with a simple EWMA to avoid jitter
+                                        // whipsawing the adaptive controller.
+                                        let prev = CURRENT_LATENCY.load(Ordering::Relaxed);
+                                        let smoothed = (prev * 3 + rtt_ms) / 4;
+                                        CURRENT_LATENCY.store(smoothed, Ordering::Relaxed);
+                                    }
                                     DataPacket::Disconnect => {
                                         info!("Host received Disconnect packet, closing session.");
                                         let _ = pc.close().await;
                                         break;
                                     }
+                                    DataPacket::Ping { .. } => { /* host doesn't expect pings */ }
                                 }
                             }
                         }
                         _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
+                            // Send a latency probe each tick.
+                            if let Some(channel) = &dc {
+                                ping_nonce = ping_nonce.wrapping_add(1);
+                                let ping = DataPacket::Ping { nonce: ping_nonce, ts_micros: now_micros() };
+                                if let Ok(bytes) = bincode::serialize(&ping) {
+                                    let _ = channel.send(&bytes.into()).await;
+                                }
+                            }
                             if let Some(text) = clip.get_text() {
                                 if text != last_text {
                                     last_text = text.clone();
@@ -498,11 +557,16 @@ async fn process_offer_internal(
 
                                     match capture.capture_frame() {
                                         Ok(frame) => {
+                                            // Adapt quality + frame rate to the
+                                            // live, measured RTT (ping/pong).
+                                            let rtt = CURRENT_LATENCY.load(Ordering::Relaxed);
+                                            let (quality, _delay) = adaptive_params(rtt);
                                             if let Some(jpeg) = encode_frame_to_jpeg(
                                                 &frame.data,
                                                 frame.width,
                                                 frame.height,
                                                 frame.pixel_format,
+                                                quality,
                                             ) {
                                                 if frame_tx.blocking_send(jpeg).is_err() {
                                                     break; // receiver gone -> session ended
@@ -529,9 +593,12 @@ async fn process_offer_internal(
                                         }
                                     }
 
-                                    // Cap at ~30 FPS; DXGI only returns changed frames so this is
-                                    // an upper bound, not a busy loop.
-                                    std::thread::sleep(std::time::Duration::from_millis(33));
+                                    // Adaptive frame-rate cap derived from live
+                                    // RTT. DXGI only returns changed frames, so
+                                    // this is an upper bound, not a busy loop.
+                                    let rtt = CURRENT_LATENCY.load(Ordering::Relaxed);
+                                    let (_q, delay_ms) = adaptive_params(rtt);
+                                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                                 }
                             }
                             Err(e) => {
@@ -637,9 +704,10 @@ fn main() {
                     let total_bits = (sent + recv) * 8;
                     let kbps = total_bits / 1000;
                     CURRENT_BITRATE.store(kbps, Ordering::Relaxed);
-                    
-                    let base_lat = 35 + (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_millis() % 15) as usize;
-                    CURRENT_LATENCY.store(base_lat, Ordering::Relaxed);
+
+                    // CURRENT_LATENCY is now populated by the real ping/pong RTT
+                    // probe in the host data loop (DataPacket::Ping/Pong), not a
+                    // synthetic value.
                 }
             });
             
