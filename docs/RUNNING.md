@@ -40,9 +40,9 @@ cp /tmp/target-wsl/x86_64-pc-windows-gnu/release/desktop.exe \
    "release_build/Remote Control.exe"
 ```
 
-> Do NOT use `build_windows_exe.sh` — it copies only a hand-picked file subset
-> into a separate build dir and will miss recent changes. Use the commands above
-> (or `apps/desktop/package_release.sh`), which build from the live workspace.
+> The commands above (or `apps/desktop/package_release.sh`) build from the live
+> workspace and pick up all crates. Avoid any script that copies only a subset
+> of files into a separate build dir — it will produce a stale binary.
 
 ## 3. Running a session
 
