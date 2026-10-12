@@ -629,9 +629,9 @@ export function ActiveSession({
 
       {/* Video pipeline status (hidden once the first frame paints) */}
       {!firstFramePainted && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none">
-          <div className="bg-black/70 border border-border/50 rounded-lg px-4 py-3 text-center max-w-md">
-            <p className="text-sm font-mono text-amber-300">{videoStatus}</p>
+        <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none p-4">
+          <div className="bg-black/70 border border-border/50 rounded-lg px-4 py-3 text-center max-w-[90vw] sm:max-w-md">
+            <p className="text-sm font-mono text-amber-300 break-words">{videoStatus}</p>
             <p className="text-[10px] text-muted-foreground mt-1">Video pipeline diagnostic</p>
           </div>
         </div>
@@ -644,11 +644,11 @@ export function ActiveSession({
           className="flex items-center gap-2 bg-background/80 hover:bg-background/95 backdrop-blur-md border border-border/60 rounded-full px-3 py-1.5 text-xs font-mono text-foreground shadow-lg transition-all active:scale-95"
           title="Toggle telemetry HUD"
         >
-          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
           <span className="font-semibold text-emerald-400">60 FPS</span>
-          <span className="text-muted-foreground">·</span>
-          <span className="text-muted-foreground">&lt; 35ms RTT</span>
-          <Activity className="h-3.5 w-3.5 text-primary ml-1" />
+          <span className="text-muted-foreground hidden sm:inline">·</span>
+          <span className="text-muted-foreground hidden sm:inline">&lt; 35ms RTT</span>
+          <Activity className="h-3.5 w-3.5 text-primary ml-1 shrink-0" />
         </button>
       </div>
 

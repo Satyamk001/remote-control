@@ -68,11 +68,11 @@ export function HostAgentPanel() {
   };
 
   return (
-    <div className="p-8 space-y-6 max-w-5xl mx-auto">
+    <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-5xl mx-auto">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-border/40 pb-5">
-        <div className="flex items-center gap-3">
-          <HyperText text="HOST AGENT" className="text-2xl font-bold tracking-tight text-foreground" />
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/40 pb-5">
+        <div className="flex items-center gap-3 min-w-0">
+          <HyperText text="HOST AGENT" className="text-xl sm:text-2xl font-bold tracking-tight text-foreground" />
           <Badge 
             variant="outline" 
             className={`gap-1.5 px-2.5 py-0.5 text-xs font-semibold ${
@@ -103,12 +103,12 @@ export function HostAgentPanel() {
       {/* Device ID Card */}
       <div className="rounded-2xl border border-border/40 bg-card/30 p-5 backdrop-blur-sm">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="space-y-1">
+          <div className="space-y-1 min-w-0 flex-1">
             <div className="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
-              <ShieldCheck className="h-3.5 w-3.5 text-primary" />
+              <ShieldCheck className="h-3.5 w-3.5 text-primary shrink-0" />
               <span>Your Device ID</span>
             </div>
-            <div className="font-mono text-base sm:text-lg font-bold text-foreground select-all bg-background/60 px-3 py-1 rounded-md border border-border/40 inline-block">
+            <div className="font-mono text-xs sm:text-sm font-bold text-foreground select-all bg-background/60 px-3 py-1.5 rounded-md border border-border/40 break-all leading-relaxed">
               {deviceId}
             </div>
           </div>
@@ -116,7 +116,7 @@ export function HostAgentPanel() {
           <Button
             onClick={handleCopy}
             variant={copied ? "default" : "secondary"}
-            className="gap-2 text-xs font-medium h-9 px-3.5 active:scale-95 transition-all self-start sm:self-center"
+            className="gap-2 text-xs font-medium h-9 px-3.5 active:scale-95 transition-all self-start sm:self-center shrink-0"
           >
             {copied ? (
               <>
@@ -132,8 +132,8 @@ export function HostAgentPanel() {
           </Button>
         </div>
 
-        <div className="mt-4 pt-4 border-t border-border/30 flex items-center justify-between">
-          <div className="space-y-0.5">
+        <div className="mt-4 pt-4 border-t border-border/30 flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-0.5 min-w-0 flex-1">
             <h4 className="text-sm font-semibold text-foreground">Unattended Access</h4>
             <p className="text-[11px] text-muted-foreground">Automatically accept incoming connection requests without prompting.</p>
           </div>
@@ -141,7 +141,7 @@ export function HostAgentPanel() {
             variant={autoAccept ? "default" : "outline"}
             size="sm"
             onClick={toggleAutoAccept}
-            className={`h-8 gap-2 text-xs font-medium transition-all ${autoAccept ? "bg-amber-500 hover:bg-amber-600 text-black border-none" : "border-border/60 hover:bg-secondary/60 text-muted-foreground"}`}
+            className={`h-8 gap-2 text-xs font-medium transition-all shrink-0 ${autoAccept ? "bg-amber-500 hover:bg-amber-600 text-black border-none" : "border-border/60 hover:bg-secondary/60 text-muted-foreground"}`}
           >
             {autoAccept ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
             {autoAccept ? "Auto-Accept: ON" : "Auto-Accept: OFF"}
@@ -232,7 +232,7 @@ export function HostAgentPanel() {
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-                <div className="bg-secondary/30 border border-border/30 rounded-lg p-2.5">
+                <div className="bg-secondary/30 border border-border/30 rounded-lg p-2.5 min-w-0">
                   <span className="text-[10px] text-muted-foreground uppercase tracking-wider block">Peer</span>
                   <span className="font-semibold text-xs text-foreground truncate block">{status.client_name || "Connected"}</span>
                 </div>

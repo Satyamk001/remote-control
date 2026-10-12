@@ -31,11 +31,11 @@ export function DiagnosticsPanel() {
   if (!metrics) return null;
 
   return (
-    <Card className="absolute top-4 left-4 w-72 bg-black/80 text-white border-zinc-800 backdrop-blur">
+    <Card className="absolute top-4 left-4 right-4 sm:right-auto w-auto sm:w-72 max-w-[calc(100vw-2rem)] bg-black/80 text-white border-zinc-800 backdrop-blur">
       <CardHeader className="py-3">
-        <CardTitle className="text-sm font-mono flex items-center justify-between">
+        <CardTitle className="text-sm font-mono flex items-center justify-between gap-2">
           <span>Diagnostics</span>
-          <span className="text-green-400">{metrics.fps} FPS</span>
+          <span className="text-green-400 shrink-0">{metrics.fps} FPS</span>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-1 text-xs font-mono pb-4">

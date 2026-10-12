@@ -7,6 +7,7 @@ import { BouncingLoader } from "./components/ui/bouncing-loader";
 import { MorphingText } from "./components/ui/morphing-text";
 import { cn } from "@/lib/utils";
 import { motion } from "framer-motion";
+import { Monitor, MonitorPlay, Server } from "lucide-react";
 
 /* Hallmark · component: sidebar · genre: modern-minimal
  * states: default · hover · focus-visible · active
@@ -46,21 +47,30 @@ function App() {
 
   return (
     <div className="flex min-h-screen bg-background">
-      {/* Sidebar Navigation */}
-      <aside className="w-64 border-r border-border bg-card flex flex-col p-4 shadow-sm z-10">
-        <div className="mb-6 h-[40px] flex items-center px-2">
-          <MorphingText words={["Remote Control", "Workstation", "P2P Stream"]} className="text-lg font-bold tracking-tight text-foreground !text-left" />
+      {/* Sidebar Navigation — compact rail on narrow windows, full on wider */}
+      <aside className="w-16 md:w-64 shrink-0 border-r border-border bg-card flex flex-col p-2 md:p-4 shadow-sm z-10 transition-[width] duration-200">
+        <div className="mb-6 h-[40px] flex items-center px-1 md:px-2 overflow-hidden">
+          {/* Full wordmark on wider windows */}
+          <div className="hidden md:block min-w-0">
+            <MorphingText words={["Remote Control", "Workstation", "P2P Stream"]} className="text-lg font-bold tracking-tight text-foreground !text-left truncate" />
+          </div>
+          {/* Compact monogram on the narrow rail */}
+          <div className="md:hidden mx-auto w-9 h-9 rounded-lg bg-primary/15 border border-primary/30 flex items-center justify-center">
+            <Monitor className="h-4 w-4 text-primary" />
+          </div>
         </div>
         
         <nav className="flex flex-col space-y-1.5 relative">
           {tabs.map((tab) => {
             const isActive = activeTab === tab;
+            const Icon = tab === "client" ? MonitorPlay : Server;
             return (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
+                title={tab === "client" ? "Connect" : "Host Agent"}
                 className={cn(
-                  "relative group flex items-center justify-between px-3.5 py-2.5 text-xs font-semibold rounded-lg transition-all duration-200 outline-none w-full",
+                  "relative group flex items-center gap-2.5 justify-center md:justify-start px-0 md:px-3.5 py-2.5 text-xs font-semibold rounded-lg transition-all duration-200 outline-none w-full",
                   isActive
                     ? "text-primary-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.98]"
@@ -81,7 +91,8 @@ function App() {
                 {!isActive && (
                   <div className="absolute inset-0 bg-secondary/50 opacity-0 group-hover:opacity-100 rounded-lg transition-opacity duration-150 -z-10" />
                 )}
-                <span className="relative z-10">
+                <Icon className="relative z-10 h-4 w-4 shrink-0" />
+                <span className="relative z-10 hidden md:inline">
                   {tab === "client" ? "Connect" : "Host Agent"}
                 </span>
               </button>
@@ -91,12 +102,12 @@ function App() {
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 overflow-auto relative">
+      <main className="flex-1 min-w-0 overflow-auto relative">
         {connecting && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/90 backdrop-blur-md">
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/90 backdrop-blur-md p-6">
             <div className="flex flex-col items-center space-y-6">
               <BouncingLoader />
-              <p className="text-xl font-bold tracking-widest text-primary animate-pulse">ESTABLISHING CONNECTION</p>
+              <p className="text-base sm:text-xl font-bold tracking-widest text-primary animate-pulse text-center">ESTABLISHING CONNECTION</p>
             </div>
           </div>
         )}

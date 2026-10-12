@@ -71,12 +71,12 @@ export function Dashboard({ onConnect }: { onConnect: (id: string) => void }) {
   const onlineCount = filteredDevices.filter(d => d.status === "online").length;
 
   return (
-    <div className="p-8 space-y-6 max-w-6xl mx-auto">
+    <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-6xl mx-auto">
       {/* Header Section */}
-      <div className="flex items-center justify-between border-b border-border/40 pb-5">
-        <div className="flex items-center gap-3">
-          <HyperText text="DEVICES" className="text-2xl font-bold tracking-tight text-foreground" />
-          <Badge variant="secondary" className="px-2 py-0.5 text-xs font-semibold">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/40 pb-5">
+        <div className="flex items-center gap-3 min-w-0">
+          <HyperText text="DEVICES" className="text-xl sm:text-2xl font-bold tracking-tight text-foreground" />
+          <Badge variant="secondary" className="px-2 py-0.5 text-xs font-semibold shrink-0">
             {onlineCount} Online
           </Badge>
         </div>
