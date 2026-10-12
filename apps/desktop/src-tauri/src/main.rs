@@ -643,10 +643,17 @@ fn main() {
                 }
             });
             
-            // Start Signaling Client in background
+            // Start Signaling Client in background.
+            //
+            // The signaling endpoint can be overridden at runtime via the
+            // REMOTE_CONTROL_SIGNALING_URL environment variable. This keeps the
+            // deployed Render.com instance as the zero-config default while
+            // allowing self-hosted / LAN signaling servers for private testing.
+            let signaling_url = std::env::var("REMOTE_CONTROL_SIGNALING_URL")
+                .unwrap_or_else(|_| "wss://remote-control-y1jb.onrender.com".to_string());
             let app_handle = app.handle();
             tauri::async_runtime::spawn(async move {
-                match networking::signaling::SignalingClient::connect("wss://remote-control-y1jb.onrender.com", &device_id_hex).await {
+                match networking::signaling::SignalingClient::connect(&signaling_url, &device_id_hex).await {
                     Ok(client) => {
                         info!("Connected to signaling server as {}", device_id_hex);
                         

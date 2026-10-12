@@ -35,22 +35,45 @@ impl WebRtcTransport {
             .with_media_engine(media_engine)
             .build();
 
+        // ICE server configuration is environment-driven so the same binary
+        // works for LAN (STUN often enough) and real cross-NAT internet tests
+        // (where a reachable TURN relay is required for symmetric NATs).
+        //
+        //   REMOTE_CONTROL_STUN_URL   (default: Google public STUN)
+        //   REMOTE_CONTROL_TURN_URL   (optional; TURN is only added if set)
+        //   REMOTE_CONTROL_TURN_USER
+        //   REMOTE_CONTROL_TURN_PASS
+        //
+        // The previous hardcoded `turn:127.0.0.1:3478` / testuser default was
+        // only reachable on the dev box and useless for the friend's-PC test,
+        // so TURN now defaults to *disabled* unless explicitly configured.
+        let stun_url = std::env::var("REMOTE_CONTROL_STUN_URL")
+            .unwrap_or_else(|_| "stun:stun.l.google.com:19302".to_string());
+
+        let mut ice_servers = vec![
+            // Primary STUN (direct P2P resolution)
+            RTCIceServer {
+                urls: vec![stun_url],
+                ..Default::default()
+            },
+        ];
+
+        // Optional TURN relay for symmetric-NAT fallback.
+        if let Ok(turn_url) = std::env::var("REMOTE_CONTROL_TURN_URL") {
+            if !turn_url.is_empty() {
+                ice_servers.push(RTCIceServer {
+                    urls: vec![turn_url],
+                    username: std::env::var("REMOTE_CONTROL_TURN_USER").unwrap_or_default(),
+                    credential: std::env::var("REMOTE_CONTROL_TURN_PASS").unwrap_or_default(),
+                    credential_type:
+                        webrtc::ice_transport::ice_credential_type::RTCIceCredentialType::Password,
+                    ..Default::default()
+                });
+            }
+        }
+
         let config = RTCConfiguration {
-            ice_servers: vec![
-                // Primary STUN (Direct P2P resolution)
-                RTCIceServer {
-                    urls: vec!["stun:stun.l.google.com:19302".to_string()],
-                    ..Default::default()
-                },
-                // Fallback TURN (Relay for Symmetric NATs)
-                RTCIceServer {
-                    urls: vec!["turn:127.0.0.1:3478".to_string()],
-                    username: "testuser".to_string(),
-                    credential: "testpassword".to_string(),
-                    credential_type: webrtc::ice_transport::ice_credential_type::RTCIceCredentialType::Password,
-                    ..Default::default()
-                }
-            ],
+            ice_servers,
             ..Default::default()
         };
 

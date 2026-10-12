@@ -28,13 +28,41 @@
 - **Phase 24 (MVP Polish)**: Implemented robust teardown logic when clients disconnect. Synchronized the Host and Client clipboard using the `arboard` crate across the DataChannel. Integrated live performance telemetry polling (RTT, FPS, Bitrate) straight from the WebRTC stats API into the React UI dashboard.
 - **Phase 25 (Hardware Acceleration)**: Engineered the architectural foundation for a zero-copy DXGI-to-VRAM video pipeline. Integrated the `windows` crate bindings for Microsoft's COM APIs (DXGI, Direct3D11, Media Foundation) and gracefully implemented WSL-fallback mechanisms to maintain local testing compatibility.
 
-## Future Phases (Pending Implementation)
+## Post-Phase Hardening (Real Implementations)
 
-*(None. The Master Requirements spec is 100% complete!)*
+The 25 numbered phases built the full architecture, but several pipelines were
+mocked. These are being replaced with real implementations:
+
+- **Real input injection** (DONE): `crates/input` now uses Win32 `SendInput`
+  (mouse move/button/scroll, keyboard) under the no-admin constraint, wired into
+  the host data loop. Verified via WSL cross-compile.
+- **Real screen capture** (DONE): `crates/screen-capture/dxgi.rs` performs true
+  DXGI Desktop Duplication CPU readback (staging texture + row de-padding),
+  replacing the previous fake black buffer. Verified via WSL cross-compile.
+- **Configurable endpoints** (DONE): signaling URL, STUN, and TURN are now
+  environment-driven (`REMOTE_CONTROL_SIGNALING_URL`, `REMOTE_CONTROL_STUN_URL`,
+  `REMOTE_CONTROL_TURN_URL` / `_USER` / `_PASS`). See `docs/configuration.md`.
+  Previously the TURN relay was hardcoded to `127.0.0.1` with test creds.
+
+## Remaining Work Toward the Goal (1080p low-latency workstation)
+
+- **Real video codec**: The live pipeline currently ships JPEG frames over a
+  WebRTC DataChannel, re-served to the UI as MJPEG. The `video` crate's
+  `HardwareVideoEncoder` is a stub (logs NVENC but clones the buffer). Needed:
+  real H.264 encode/decode, ideally over a WebRTC video track (RTP/SRTP) to
+  unlock congestion control and hardware (NVENC/QuickSync) encoding. This is the
+  primary gap for the 1080p/60 FPS target.
+- **Audio wiring**: `cpal` loopback capture exists in a crate but is not wired
+  into the live Tauri session loop.
+- **File transfer wiring**: `file-transfer` crate (chunked, CRC32) is not yet
+  reachable from the UI / active DataPacket loop.
+- **Full metrics**: Only aggregate RTT/FPS/bitrate are surfaced; the spec's
+  per-stage latency / jitter / packet-loss breakdown is not yet implemented.
 
 ## Current Focus
 
-All 25 phases have been completed. The project has reached its final milestone.
+End-to-end smoke test on real Windows hardware (host + viewer + signaling), then
+the real H.264 video pipeline.
 
 ## Known Issues / Limitations
 
