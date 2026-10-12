@@ -12,6 +12,7 @@ screen-capture = { path = "../screen-capture" }
 networking = { path = "../networking" }
 flate2 = "1.0"
 openh264 = "0.6"
+image = "0.24"
 windows = { version = "0.52", features = [
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",

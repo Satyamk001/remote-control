@@ -2,6 +2,7 @@ pub mod error;
 pub mod packetizer;
 pub mod encoder;
 pub mod h264;
+pub mod jpeg;
 pub mod decoder;
 pub mod renderer;
 

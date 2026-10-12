@@ -32,6 +32,9 @@ static DECODE_LATENCY_US: AtomicUsize = AtomicUsize::new(0);
 /// acquire it — otherwise the new session fails and falls back to the mock
 /// gradient generator.
 static CAPTURE_GENERATION: AtomicUsize = AtomicUsize::new(0);
+/// Viewer-selected video codec: 0 = H.264 (WebCodecs), 1 = MJPEG (fallback for
+/// webviews without WebCodecs, e.g. WebKitGTK on Linux). Default H.264.
+static VIDEO_CODEC: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub enum DataPacket {
@@ -52,6 +55,8 @@ pub enum DataPacket {
     FileChunk { file_id: String, seq: u64, data: Vec<u8>, checksum: u32 },
     /// Viewer -> host: finalize the file (rename .part -> final).
     FileComplete { file_id: String },
+    /// Viewer -> host: select the video codec ("h264" or "mjpeg").
+    SetCodec { codec: String },
 }
 
 /// Monotonic-ish timestamp in microseconds since the UNIX epoch, used for RTT.
@@ -448,6 +453,18 @@ async fn send_file(
 }
 
 #[tauri::command]
+async fn set_codec(codec: String, session: tauri::State<'_, AppSession>) -> Result<(), String> {
+    let packet = DataPacket::SetCodec { codec };
+    let bytes = bincode::serialize(&packet).map_err(|e| e.to_string())?;
+    if let Some(transport) = session.webrtc.read().await.as_ref() {
+        if let Some(dc) = &transport.data_channel {
+            let _ = dc.send(&bytes.into()).await;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn toggle_audio(muted: bool, session: tauri::State<'_, AppSession>) -> Result<(), String> {
     let packet = DataPacket::ToggleAudio { muted };
     let bytes = bincode::serialize(&packet).map_err(|e| e.to_string())?;
@@ -670,6 +687,11 @@ async fn process_offer_internal(
                                             Err(e) => error!("File complete {} failed: {:?}", file_id, e),
                                         }
                                     }
+                                    DataPacket::SetCodec { codec } => {
+                                        let c = if codec == "mjpeg" { 1 } else { 0 };
+                                        info!("Host received SetCodec({}) -> {}", codec, c);
+                                        VIDEO_CODEC.store(c, Ordering::Relaxed);
+                                    }
                                     DataPacket::Ping { .. } => { /* host doesn't expect pings */ }
                                 }
                             }
@@ -735,24 +757,35 @@ async fn process_offer_internal(
                                 let (w, h) = capture.resolution();
                                 tracing::info!("DXGI capture active at {}x{}", w, h);
 
-                                let mut encoder = match video::h264::H264Encoder::new() {
-                                    Ok(e) => e,
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "H264 encoder init failed ({}); falling back to mock.",
-                                            e
-                                        );
-                                        run_mock_capture(frame_tx, switch_rx);
-                                        return;
+                                // Encoder is (re)built from the viewer-requested
+                                // codec. We re-check VIDEO_CODEC each iteration so
+                                // a SetCodec arriving at any time switches the
+                                // encoder — no reliance on a startup timing window.
+                                fn build_encoder(codec: usize) -> Box<dyn video::VideoEncoder + Send> {
+                                    if codec == 1 {
+                                        tracing::info!("Video encoder: MJPEG (viewer fallback).");
+                                        Box::new(video::jpeg::JpegEncoder::new(70))
+                                    } else {
+                                        match video::h264::H264Encoder::new() {
+                                            Ok(e) => { tracing::info!("Video encoder: H.264."); Box::new(e) }
+                                            Err(e) => {
+                                                tracing::error!("H264 init failed ({}); using MJPEG.", e);
+                                                Box::new(video::jpeg::JpegEncoder::new(70))
+                                            }
+                                        }
                                     }
-                                };
-                                // Cache the most recent frame so we can re-emit
-                                // keyframes while the screen is static (DXGI
-                                // returns Timeout instead of a frame when nothing
-                                // changes, which would otherwise starve a
-                                // mid-stream viewer of keyframes).
+                                }
+                                let mut current_codec = VIDEO_CODEC.load(Ordering::Relaxed);
+                                let mut encoder = build_encoder(current_codec);
                                 let mut last_frame: Option<screen_capture::Frame> = None;
                                 loop {
+                                    // Rebuild the encoder if the viewer changed codec.
+                                    let want = VIDEO_CODEC.load(Ordering::Relaxed);
+                                    if want != current_codec {
+                                        tracing::info!("Codec changed {} -> {}, rebuilding encoder.", current_codec, want);
+                                        current_codec = want;
+                                        encoder = build_encoder(current_codec);
+                                    }
                                     // Exit if a newer session started (releases DXGI for it).
                                     if CAPTURE_GENERATION.load(Ordering::Relaxed) != my_gen {
                                         tracing::info!("Capture gen {} superseded; stopping capture.", my_gen);
@@ -784,7 +817,7 @@ async fn process_offer_internal(
                                             last_frame = Some(frame);
                                             let f = last_frame.as_ref().unwrap();
                                             let enc_start = std::time::Instant::now();
-                                            match video::VideoEncoder::encode(&mut encoder, f) {
+                                            match encoder.encode(f) {
                                                 Ok(encoded) if !encoded.data.is_empty() => {
                                                     ENCODE_LATENCY_US.store(
                                                         enc_start.elapsed().as_micros() as usize,
@@ -810,7 +843,7 @@ async fn process_offer_internal(
                                             // timer still fires and mid-stream viewers can sync.
                                             if let Some(f) = last_frame.as_ref() {
                                                 if let Ok(encoded) =
-                                                    video::VideoEncoder::encode(&mut encoder, f)
+                                                    encoder.encode(f)
                                                 {
                                                     if encoded.is_keyframe && !encoded.data.is_empty() {
                                                         let wire = frame_h264(
@@ -1148,6 +1181,7 @@ fn main() {
             switch_monitor,
             send_input_event,
             toggle_audio,
+            set_codec,
             send_file,
             get_local_device_id,
             get_host_session_status,

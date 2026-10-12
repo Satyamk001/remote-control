@@ -49,6 +49,15 @@ export function ActiveSession({
   const mutedRef = useRef<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
+  // Decide the video path: H.264 via WebCodecs when available (Windows/WebView2),
+  // else MJPEG into an <img> (e.g. WebKitGTK on Linux has no WebCodecs/H.264).
+  const useMjpeg = typeof (window as any).VideoDecoder === "undefined";
+  const imgRef = useRef<HTMLImageElement | null>(null);
+
+  // Tell the host which codec to produce, as soon as the session mounts.
+  useEffect(() => {
+    invoke("set_codec", { codec: useMjpeg ? "mjpeg" : "h264" }).catch(() => {});
+  }, []);
 
   // Map a viewport cursor position to normalized 0..65535 absolute coordinates
   // over the remote desktop, accounting for `object-contain` letterboxing of the
@@ -56,12 +65,12 @@ export function ActiveSession({
   // area (i.e. over the black letterbox bars), so we don't inject off-screen
   // moves.
   const toRemoteCoords = (clientX: number, clientY: number): { x: number; y: number } | null => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
+    const el: HTMLElement | null = useMjpeg ? imgRef.current : canvasRef.current;
+    if (!el) return null;
 
-    const rect = canvas.getBoundingClientRect();
-    const natW = videoSizeRef.current.w || canvas.width;
-    const natH = videoSizeRef.current.h || canvas.height;
+    const rect = el.getBoundingClientRect();
+    const natW = videoSizeRef.current.w || rect.width;
+    const natH = videoSizeRef.current.h || rect.height;
     if (natW === 0 || natH === 0 || rect.width === 0 || rect.height === 0) return null;
 
     // object-contain: scale uniformly to fit, then center.
@@ -93,7 +102,7 @@ export function ActiveSession({
   // decoded frames onto the canvas. This replaces the previous <img> MJPEG path
   // and gives real H.264 decoding (WebView2/Chromium 94+).
   useEffect(() => {
-    if (!streamUrl) return;
+    if (!streamUrl || useMjpeg) return;
     const AnyWin = window as any;
     if (typeof AnyWin.VideoDecoder === "undefined") {
       console.error("WebCodecs VideoDecoder unavailable in this runtime.");
@@ -247,6 +256,73 @@ export function ActiveSession({
       } catch {
         /* ignore */
       }
+    };
+  }, [streamUrl]);
+
+  // MJPEG fallback pipeline (for webviews without WebCodecs, e.g. WebKitGTK).
+  //
+  // Reads the same length-prefixed stream `[u8 flag][u32 le len][payload]`, but
+  // each payload is a complete JPEG. We turn it into an object URL and swap it
+  // into an <img>, which every webview can render.
+  useEffect(() => {
+    if (!streamUrl || !useMjpeg) return;
+
+    let cancelled = false;
+    const abort = new AbortController();
+    let lastUrl: string | null = null;
+
+    const run = async () => {
+      try {
+        setVideoStatus("Connecting to video stream (MJPEG)…");
+        const resp = await fetch(streamUrl, { signal: abort.signal });
+        if (!resp.body) { setVideoStatus("Video stream has no body."); return; }
+        const reader = resp.body.getReader();
+        let buffer = new Uint8Array(0);
+        const append = (chunk: Uint8Array) => {
+          const merged = new Uint8Array(buffer.length + chunk.length);
+          merged.set(buffer, 0); merged.set(chunk, buffer.length); buffer = merged;
+        };
+
+        while (!cancelled) {
+          const { done, value } = await reader.read();
+          if (done) {
+            setFirstFramePainted(false);
+            setVideoStatus("Remote stream ended (host disconnected).");
+            break;
+          }
+          if (value) append(value);
+
+          while (buffer.length >= 5) {
+            const len = buffer[1] | (buffer[2] << 8) | (buffer[3] << 16) | (buffer[4] << 24);
+            if (len < 0 || len > 50_000_000) return;
+            if (buffer.length < 5 + len) break;
+            const payload = buffer.slice(5, 5 + len);
+            buffer = buffer.slice(5 + len);
+
+            const blob = new Blob([payload], { type: "image/jpeg" });
+            const url = URL.createObjectURL(blob);
+            if (imgRef.current) {
+              imgRef.current.src = url;
+              const w = imgRef.current.naturalWidth, h = imgRef.current.naturalHeight;
+              if (w && h) videoSizeRef.current = { w, h };
+            }
+            // Revoke the previous URL to avoid leaking memory.
+            if (lastUrl) URL.revokeObjectURL(lastUrl);
+            lastUrl = url;
+            if (!firstFramePainted) setFirstFramePainted(true);
+          }
+        }
+      } catch (e: any) {
+        if (!cancelled) setVideoStatus("Stream error: " + (e?.message || e));
+      }
+    };
+
+    run();
+
+    return () => {
+      cancelled = true;
+      abort.abort();
+      if (lastUrl) URL.revokeObjectURL(lastUrl);
     };
   }, [streamUrl]);
 
@@ -536,11 +612,19 @@ export function ActiveSession({
     >
       {/* Video Streaming Canvas (WebCodecs H.264 decode target) */}
       <div className={`w-full h-full flex items-center justify-center transition-opacity duration-500 ${connectionState !== "connected" ? "opacity-30 blur-sm" : "opacity-100"}`}>
-        <canvas
-          ref={canvasRef}
-          className="w-full h-full object-contain pointer-events-none"
-          aria-label={`Video Stream from ${deviceId}`}
-        />
+        {useMjpeg ? (
+          <img
+            ref={imgRef}
+            className="w-full h-full object-contain pointer-events-none"
+            alt={`Video Stream from ${deviceId}`}
+          />
+        ) : (
+          <canvas
+            ref={canvasRef}
+            className="w-full h-full object-contain pointer-events-none"
+            aria-label={`Video Stream from ${deviceId}`}
+          />
+        )}
       </div>
 
       {/* Video pipeline status (hidden once the first frame paints) */}
