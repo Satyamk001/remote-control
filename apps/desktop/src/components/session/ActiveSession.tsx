@@ -35,24 +35,25 @@ export function ActiveSession({
   const [clipboardCopied, setClipboardCopied] = useState(false);
   
   const toolbarTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const imgRef = useRef<HTMLImageElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Intrinsic resolution of the decoded remote frames, updated as frames arrive.
+  const videoSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
 
   // Map a viewport cursor position to normalized 0..65535 absolute coordinates
   // over the remote desktop, accounting for `object-contain` letterboxing of the
-  // streamed <img>. Returns null when the cursor is outside the visible video
-  // content area (i.e. over the black letterbox bars), so we don't inject
-  // off-screen moves.
+  // canvas. Returns null when the cursor is outside the visible video content
+  // area (i.e. over the black letterbox bars), so we don't inject off-screen
+  // moves.
   const toRemoteCoords = (clientX: number, clientY: number): { x: number; y: number } | null => {
-    const img = imgRef.current;
-    if (!img) return null;
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
 
-    const rect = img.getBoundingClientRect();
-    const natW = img.naturalWidth || rect.width;
-    const natH = img.naturalHeight || rect.height;
+    const rect = canvas.getBoundingClientRect();
+    const natW = videoSizeRef.current.w || canvas.width;
+    const natH = videoSizeRef.current.h || canvas.height;
     if (natW === 0 || natH === 0 || rect.width === 0 || rect.height === 0) return null;
 
-    // Compute the displayed content rectangle inside the element for object-contain:
-    // the image is scaled uniformly to fit, then centered.
+    // object-contain: scale uniformly to fit, then center.
     const scale = Math.min(rect.width / natW, rect.height / natH);
     const dispW = natW * scale;
     const dispH = natH * scale;
@@ -72,6 +73,129 @@ export function ActiveSession({
       y: Math.max(0, Math.min(65535, normY)),
     };
   };
+
+  // WebCodecs H.264 decode pipeline.
+  //
+  // The host streams length-prefixed Annex-B access units over `streamUrl`
+  // (`[u8 keyframe_flag][u32 le len][payload]`). We read the response body as a
+  // stream, reassemble each access unit, feed it to a VideoDecoder, and paint
+  // decoded frames onto the canvas. This replaces the previous <img> MJPEG path
+  // and gives real H.264 decoding (WebView2/Chromium 94+).
+  useEffect(() => {
+    if (!streamUrl) return;
+    const AnyWin = window as any;
+    if (typeof AnyWin.VideoDecoder === "undefined") {
+      console.error("WebCodecs VideoDecoder unavailable in this runtime.");
+      return;
+    }
+
+    let cancelled = false;
+    const abort = new AbortController();
+    let decoder: any = null;
+    let configured = false;
+
+    const ctx = canvasRef.current?.getContext("2d") ?? null;
+
+    const paint = (frame: any) => {
+      try {
+        const canvas = canvasRef.current;
+        const w = frame.displayWidth || frame.codedWidth;
+        const h = frame.displayHeight || frame.codedHeight;
+        if (canvas && (canvas.width !== w || canvas.height !== h)) {
+          canvas.width = w;
+          canvas.height = h;
+        }
+        videoSizeRef.current = { w, h };
+        if (ctx) ctx.drawImage(frame, 0, 0);
+      } finally {
+        frame.close();
+      }
+    };
+
+    const ensureDecoder = () => {
+      if (decoder) return;
+      decoder = new AnyWin.VideoDecoder({
+        output: paint,
+        error: (e: any) => console.error("VideoDecoder error:", e),
+      });
+    };
+
+    const run = async () => {
+      try {
+        const resp = await fetch(streamUrl, { signal: abort.signal });
+        if (!resp.body) return;
+        const reader = resp.body.getReader();
+
+        // Rolling buffer across chunk boundaries.
+        let buffer = new Uint8Array(0);
+        const append = (chunk: Uint8Array) => {
+          const merged = new Uint8Array(buffer.length + chunk.length);
+          merged.set(buffer, 0);
+          merged.set(chunk, buffer.length);
+          buffer = merged;
+        };
+
+        while (!cancelled) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) append(value);
+
+          // Parse as many complete [flag][len][payload] units as available.
+          while (buffer.length >= 5) {
+            const flag = buffer[0];
+            const len =
+              buffer[1] | (buffer[2] << 8) | (buffer[3] << 16) | (buffer[4] << 24);
+            if (len < 0 || len > 50_000_000) {
+              // Corrupt framing; drop the connection.
+              return;
+            }
+            if (buffer.length < 5 + len) break; // wait for more bytes
+            const payload = buffer.slice(5, 5 + len);
+            buffer = buffer.slice(5 + len);
+
+            const isKey = flag === 1;
+            ensureDecoder();
+
+            // Configure on the first keyframe. avc1.42e01f = Baseline L3.1;
+            // the decoder reads actual params from the in-band SPS/PPS.
+            if (!configured) {
+              if (!isKey) continue; // must start at a keyframe
+              decoder.configure({
+                codec: "avc1.42e01f",
+                optimizeForLatency: true,
+              });
+              configured = true;
+            }
+
+            try {
+              const chunk = new AnyWin.EncodedVideoChunk({
+                type: isKey ? "key" : "delta",
+                timestamp: performance.now() * 1000,
+                data: payload,
+              });
+              decoder.decode(chunk);
+            } catch (e) {
+              console.error("decode() failed:", e);
+            }
+          }
+        }
+      } catch (e) {
+        if (!cancelled) console.error("H.264 stream error:", e);
+      }
+    };
+
+    run();
+
+    return () => {
+      cancelled = true;
+      abort.abort();
+      try {
+        if (decoder && decoder.state !== "closed") decoder.close();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [streamUrl]);
 
   // Auto-hide toolbar on mouse inactivity
   const handleUserActivity = () => {
@@ -212,13 +336,12 @@ export function ActiveSession({
       onMouseMove={handleUserActivity}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {/* Video Streaming Canvas */}
+      {/* Video Streaming Canvas (WebCodecs H.264 decode target) */}
       <div className={`w-full h-full flex items-center justify-center transition-opacity duration-500 ${connectionState !== "connected" ? "opacity-30 blur-sm" : "opacity-100"}`}>
-        <img 
-          ref={imgRef}
-          src={streamUrl} 
-          className="w-full h-full object-contain pointer-events-none" 
-          alt={`Video Stream from ${deviceId}`} 
+        <canvas
+          ref={canvasRef}
+          className="w-full h-full object-contain pointer-events-none"
+          aria-label={`Video Stream from ${deviceId}`}
         />
       </div>
 

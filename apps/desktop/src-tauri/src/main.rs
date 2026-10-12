@@ -37,6 +37,20 @@ fn now_micros() -> u64 {
         .unwrap_or(0)
 }
 
+/// Frame an encoded H.264 access unit for the viewer's binary stream.
+///
+/// Wire format (little-endian): `[u8 flags][u32 payload_len][payload]`.
+/// `flags` bit0 = keyframe (IDR). This lets the viewer's WebCodecs decoder
+/// split the continuous byte stream back into discrete `EncodedVideoChunk`s and
+/// tag key vs delta frames without parsing the Annex-B start codes itself.
+fn frame_h264(payload: &[u8], is_keyframe: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + payload.len());
+    out.push(if is_keyframe { 1u8 } else { 0u8 });
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
 /// Pick a JPEG quality + inter-frame delay (ms) from the measured RTT.
 ///
 /// Higher RTT => lower quality and lower frame rate, trading fidelity for
@@ -51,80 +65,56 @@ fn adaptive_params(rtt_ms: usize) -> (u8, u64) {
     }
 }
 
-/// Convert a captured frame buffer into a JPEG image.
-///
-/// DXGI desktop duplication delivers BGRA8 (4 bytes/px). The `image` crate's
-/// JPEG encoder expects RGB, so we drop alpha and swap B/R channels. The buffer
-/// passed in is already tightly packed (row padding stripped by the capturer).
-fn encode_frame_to_jpeg(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    format: screen_capture::PixelFormat,
-    quality: u8,
-) -> Option<Vec<u8>> {
-    let w = width as usize;
-    let h = height as usize;
-    if w == 0 || h == 0 || data.len() < w * h * 4 {
-        return None;
-    }
-
-    let mut rgb = vec![0u8; w * h * 3];
-    match format {
-        screen_capture::PixelFormat::Bgra8 | screen_capture::PixelFormat::Unknown => {
-            // Treat Unknown as BGRA (DXGI's native desktop format) by default.
-            for i in 0..(w * h) {
-                let s = i * 4;
-                let d = i * 3;
-                rgb[d] = data[s + 2]; // R <- B-position (BGRA)
-                rgb[d + 1] = data[s + 1]; // G
-                rgb[d + 2] = data[s]; // B <- R-position
-            }
-        }
-        screen_capture::PixelFormat::Rgba8 => {
-            for i in 0..(w * h) {
-                let s = i * 4;
-                let d = i * 3;
-                rgb[d] = data[s];
-                rgb[d + 1] = data[s + 1];
-                rgb[d + 2] = data[s + 2];
-            }
-        }
-    }
-
-    let img: image::RgbImage = image::ImageBuffer::from_raw(width, height, rgb)?;
-    let mut cursor = std::io::Cursor::new(Vec::new());
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, quality)
-        .encode_image(&img)
-        .ok()?;
-    Some(cursor.into_inner())
-}
-
 /// Fallback animated test pattern used when native DXGI capture is unavailable
-/// (e.g. WSL/Linux builds). Keeps the stream alive so the UI pipeline can be
-/// exercised without a real desktop capture backend.
+/// (e.g. WSL/Linux builds). Encodes synthetic BGRA frames through the same
+/// H.264 encoder so the wire format matches the real path, keeping the viewer
+/// pipeline exercisable without a real desktop capture backend.
 fn run_mock_capture(
     frame_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     switch_rx: std::sync::mpsc::Receiver<u32>,
 ) {
+    use screen_capture::{Frame, PixelFormat};
+    let (w, h): (u32, u32) = (320, 180);
+    let mut encoder = match video::h264::H264Encoder::new() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!("Mock H264 encoder init failed: {}", e);
+            return;
+        }
+    };
     let mut x_shift: u8 = 0;
     loop {
         // Drain any switch requests so the channel doesn't back up.
         while switch_rx.try_recv().is_ok() {}
 
-        let mut img = image::RgbImage::new(320, 180);
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            *p = image::Rgb([x_shift.wrapping_add(x as u8), 100, y as u8]);
+        // Build a synthetic BGRA test pattern.
+        let mut data = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                data[i] = y as u8; // B
+                data[i + 1] = 100; // G
+                data[i + 2] = x_shift.wrapping_add(x as u8); // R
+                data[i + 3] = 255; // A
+            }
         }
         x_shift = x_shift.wrapping_add(5);
 
-        let mut cursor = std::io::Cursor::new(Vec::new());
-        if image::codecs::jpeg::JpegEncoder::new(&mut cursor)
-            .encode_image(&img)
-            .is_ok()
-        {
-            if frame_tx.blocking_send(cursor.into_inner()).is_err() {
-                break;
+        let frame = Frame {
+            data,
+            width: w,
+            height: h,
+            pixel_format: PixelFormat::Bgra8,
+            timestamp_ms: now_micros() / 1000,
+            monitor_id: 0,
+        };
+
+        if let Ok(encoded) = video::VideoEncoder::encode(&mut encoder, &frame) {
+            if !encoded.data.is_empty() {
+                let wire = frame_h264(&encoded.data, encoded.is_keyframe);
+                if frame_tx.blocking_send(wire).is_err() {
+                    break;
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(33));
@@ -254,7 +244,12 @@ async fn connect_to_device(
         }
     });
     
-    // Spawn MJPEG Loopback Server for Client
+    // Spawn the H.264 binary loopback server for the viewer.
+    //
+    // The data channel delivers already-framed access units
+    // (`[u8 flags][u32 len][payload]`, see `frame_h264`). We relay those raw
+    // bytes over a single long-lived HTTP response; the frontend reads the body
+    // as a stream and feeds each access unit to a WebCodecs VideoDecoder.
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
     let local_addr = listener.local_addr().map_err(|e| e.to_string())?;
     let stream_url = format!("http://{}/stream", local_addr);
@@ -262,43 +257,29 @@ async fn connect_to_device(
     tokio::spawn(async move {
         loop {
             if let Ok((mut socket, _)) = listener.accept().await {
-                    let mut rx = video_tx.subscribe();
-                    tokio::spawn(async move {
-                        let mut buf = [0; 1024];
-                        let _ = socket.read(&mut buf).await;
-                        
-                        let headers = "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\n\r\n";
-                        if socket.write_all(headers.as_bytes()).await.is_err() { return; }
-                        
-                        // Send a 1x1 black JPEG immediately to keep the browser img tag from timing out
-                        // while it waits for the Host to approve the session.
-                        let black_jpeg = [
-                            0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x48,
-                            0x00, 0x48, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x03, 0x02, 0x02, 0x02, 0x02, 0x02, 0x03,
-                            0x02, 0x02, 0x02, 0x03, 0x03, 0x03, 0x03, 0x04, 0x06, 0x04, 0x04, 0x04, 0x04, 0x04, 0x08, 0x06,
-                            0x06, 0x05, 0x06, 0x09, 0x08, 0x0a, 0x0a, 0x09, 0x08, 0x09, 0x09, 0x0a, 0x0c, 0x0f, 0x0c, 0x0a,
-                            0x0b, 0x0e, 0x0b, 0x09, 0x09, 0x0d, 0x11, 0x0d, 0x0e, 0x0f, 0x10, 0x10, 0x11, 0x10, 0x0a, 0x0c,
-                            0x12, 0x13, 0x12, 0x10, 0x13, 0x0f, 0x10, 0x10, 0x10, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01,
-                            0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xff, 0xc4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-                            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xc4, 0x00, 0x14,
-                            0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                            0x00, 0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x37, 0xff, 0xd9,
-                        ];
-                        let header = format!("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", black_jpeg.len());
-                        if socket.write_all(header.as_bytes()).await.is_err() { return; }
-                        if socket.write_all(&black_jpeg).await.is_err() { return; }
-                        if socket.write_all(b"\r\n").await.is_err() { return; }
-                        
-                        while let Ok(frame) = rx.recv().await {
-                            let header = format!("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", frame.len());
-                            if socket.write_all(header.as_bytes()).await.is_err() { break; }
-                            if socket.write_all(&frame).await.is_err() { break; }
-                            if socket.write_all(b"\r\n").await.is_err() { break; }
-                            BYTES_RECEIVED.fetch_add(frame.len(), Ordering::Relaxed);
+                let mut rx = video_tx.subscribe();
+                tokio::spawn(async move {
+                    // Read + discard the HTTP request line/headers.
+                    let mut buf = [0; 1024];
+                    let _ = socket.read(&mut buf).await;
+
+                    // application/octet-stream: a continuous binary body of
+                    // length-prefixed H.264 access units.
+                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+                    if socket.write_all(headers.as_bytes()).await.is_err() {
+                        return;
+                    }
+
+                    while let Ok(frame) = rx.recv().await {
+                        // `frame` is already a framed access unit; relay verbatim.
+                        if socket.write_all(&frame).await.is_err() {
+                            break;
                         }
-                    });
-                }
+                        BYTES_RECEIVED.fetch_add(frame.len(), Ordering::Relaxed);
+                    }
+                });
             }
+        }
     });
 
     if let Ok(offer) = transport.peer_connection.create_offer(None).await {
@@ -542,6 +523,17 @@ async fn process_offer_internal(
                                 let (w, h) = capture.resolution();
                                 tracing::info!("DXGI capture active at {}x{}", w, h);
 
+                                let mut encoder = match video::h264::H264Encoder::new() {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "H264 encoder init failed ({}); falling back to mock.",
+                                            e
+                                        );
+                                        run_mock_capture(frame_tx, switch_rx);
+                                        return;
+                                    }
+                                };
                                 loop {
                                     // Apply any pending monitor-switch request (take the latest).
                                     let mut target: Option<u32> = None;
@@ -557,19 +549,19 @@ async fn process_offer_internal(
 
                                     match capture.capture_frame() {
                                         Ok(frame) => {
-                                            // Adapt quality + frame rate to the
-                                            // live, measured RTT (ping/pong).
-                                            let rtt = CURRENT_LATENCY.load(Ordering::Relaxed);
-                                            let (quality, _delay) = adaptive_params(rtt);
-                                            if let Some(jpeg) = encode_frame_to_jpeg(
-                                                &frame.data,
-                                                frame.width,
-                                                frame.height,
-                                                frame.pixel_format,
-                                                quality,
-                                            ) {
-                                                if frame_tx.blocking_send(jpeg).is_err() {
-                                                    break; // receiver gone -> session ended
+                                            match video::VideoEncoder::encode(&mut encoder, &frame) {
+                                                Ok(encoded) if !encoded.data.is_empty() => {
+                                                    let wire = frame_h264(
+                                                        &encoded.data,
+                                                        encoded.is_keyframe,
+                                                    );
+                                                    if frame_tx.blocking_send(wire).is_err() {
+                                                        break; // receiver gone -> session ended
+                                                    }
+                                                }
+                                                Ok(_) => { /* encoder buffered, no output yet */ }
+                                                Err(e) => {
+                                                    tracing::error!("H264 encode error: {}", e);
                                                 }
                                             }
                                         }
