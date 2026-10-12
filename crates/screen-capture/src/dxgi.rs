@@ -279,6 +279,20 @@ impl ScreenCapture for WindowsScreenCapture {
     }
 
     fn switch_monitor(&mut self, id: u32) -> Result<(), CaptureError> {
+        // No-op if already on this monitor.
+        if id == self.output_index {
+            return Ok(());
+        }
+        // Validate the target exists before tearing anything down, so a bad
+        // index (e.g. monitor 1 on a single-monitor machine) can't corrupt the
+        // currently-working capture.
+        let count = Self::list_monitors().len() as u32;
+        if id >= count {
+            return Err(CaptureError::InitFailed(format!(
+                "monitor {} does not exist (only {} present)",
+                id, count
+            )));
+        }
         let new_capture = Self::new(0, id)?;
         self.duplication = new_capture.duplication;
         self.device = new_capture.device;

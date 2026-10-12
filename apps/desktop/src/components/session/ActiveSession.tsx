@@ -168,7 +168,15 @@ export function ActiveSession({
 
         while (!cancelled) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            // Host ended the stream. Clear the frozen last frame and tell the user.
+            if (ctx && canvasRef.current) {
+              ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+            }
+            setFirstFramePainted(false);
+            setVideoStatus("Remote stream ended (host disconnected).");
+            break;
+          }
           if (value) { append(value); totalBytes += value.length;
             if (!sawFirstKey) setVideoStatus(`Receiving stream (${totalBytes} bytes), waiting for keyframe…`);
           }
@@ -371,8 +379,22 @@ export function ActiveSession({
       if (state) setConnectionState(state);
     });
 
+    // Only forward input that happens over the remote video surface — never
+    // when interacting with our own UI chrome (toolbar, HUD, overlays). Without
+    // this, clicking a toolbar button also injects a click into the host
+    // desktop (on loopback that opens File Explorer / taskbar items).
+    const isOverUiChrome = (target: EventTarget | null): boolean => {
+      let el = target as HTMLElement | null;
+      while (el) {
+        if (el.dataset && el.dataset.rcUi === "1") return true;
+        el = el.parentElement;
+      }
+      return false;
+    };
+
     const handleMouseMove = (e: MouseEvent) => {
       handleUserActivity();
+      if (isOverUiChrome(e.target)) return;
       const coords = toRemoteCoords(e.clientX, e.clientY);
       if (!coords) return;
       invoke("send_input_event", {
@@ -382,6 +404,7 @@ export function ActiveSession({
 
     const handleMouseDown = (e: MouseEvent) => {
       handleUserActivity();
+      if (isOverUiChrome(e.target)) return;
       invoke("send_input_event", { 
         event: { MouseButton: { button: e.button, down: true } } 
       }).catch(console.error);
@@ -389,6 +412,7 @@ export function ActiveSession({
 
     const handleMouseUp = (e: MouseEvent) => {
       handleUserActivity();
+      if (isOverUiChrome(e.target)) return;
       invoke("send_input_event", { 
         event: { MouseButton: { button: e.button, down: false } } 
       }).catch(console.error);
@@ -410,6 +434,7 @@ export function ActiveSession({
 
     const handleWheel = (e: WheelEvent) => {
       handleUserActivity();
+      if (isOverUiChrome(e.target)) return;
       // Normalize wheel deltas to notch counts. deltaY > 0 means scrolling down,
       // which corresponds to a negative wheel delta on Windows.
       const dy = e.deltaY > 0 ? -1 : e.deltaY < 0 ? 1 : 0;
@@ -457,11 +482,16 @@ export function ActiveSession({
     invoke("toggle_audio", { muted: next }).catch(console.error);
   };
 
-  const handleToggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(console.error);
-    } else {
-      document.exitFullscreen().catch(console.error);
+  const handleToggleFullscreen = async () => {
+    // WebView2 does not reliably support the HTML Fullscreen API, so drive the
+    // native Tauri window instead.
+    try {
+      const { appWindow } = await import("@tauri-apps/api/window");
+      const now = await appWindow.isFullscreen();
+      await appWindow.setFullscreen(!now);
+      setIsFullscreen(!now);
+    } catch (e) {
+      console.error("Fullscreen toggle failed:", e);
     }
   };
 
@@ -524,7 +554,7 @@ export function ActiveSession({
       )}
 
       {/* Top Floating Status Pill */}
-      <div className="absolute top-4 right-4 z-40 flex items-center gap-2 pointer-events-auto">
+      <div data-rc-ui="1" className="absolute top-4 right-4 z-40 flex items-center gap-2 pointer-events-auto">
         <button
           onClick={() => setShowDiagnostics(!showDiagnostics)}
           className="flex items-center gap-2 bg-background/80 hover:bg-background/95 backdrop-blur-md border border-border/60 rounded-full px-3 py-1.5 text-xs font-mono text-foreground shadow-lg transition-all active:scale-95"
@@ -595,7 +625,7 @@ export function ActiveSession({
 
       {/* Diagnostics HUD Panel */}
       {showDiagnostics && (
-        <div className="z-50 pointer-events-auto">
+        <div data-rc-ui="1" className="z-50 pointer-events-auto">
           <DiagnosticsPanel />
         </div>
       )}
@@ -608,6 +638,7 @@ export function ActiveSession({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 20 }}
             transition={{ duration: 0.2 }}
+            data-rc-ui="1"
             className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 pointer-events-auto flex items-center gap-1.5 bg-background/85 border border-border/60 rounded-full px-3.5 py-1.5 backdrop-blur-lg shadow-2xl transition-all"
             onMouseEnter={() => {
               if (toolbarTimeoutRef.current) clearTimeout(toolbarTimeoutRef.current);

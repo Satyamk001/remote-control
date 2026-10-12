@@ -25,6 +25,13 @@ static RTT_JITTER_MS: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_RESOLUTION: AtomicUsize = AtomicUsize::new(0);
 /// Viewer-reported decode latency (microseconds), set via report_decode_latency.
 static DECODE_LATENCY_US: AtomicUsize = AtomicUsize::new(0);
+/// Monotonically increasing session/capture generation. Each capture thread
+/// records the generation it was started with and exits once the global value
+/// advances (a new session started or the current one was terminated). This
+/// guarantees the DXGI duplication is released before the next session tries to
+/// acquire it — otherwise the new session fails and falls back to the mock
+/// gradient generator.
+static CAPTURE_GENERATION: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub enum DataPacket {
@@ -552,7 +559,17 @@ async fn process_offer_internal(
     session_id: String,
     sdp: String
 ) -> Result<(), String> {
-        
+        // Stop any prior session's capture thread and release its DXGI
+        // duplication before starting a new one. Without this, a reconnect
+        // finds the duplication still held and falls back to the mock gradient.
+        let my_gen = CAPTURE_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(old) = session.webrtc.write().await.take() {
+            let _ = old.peer_connection.close().await;
+        }
+        // Give the old blocking capture thread a moment to observe the
+        // generation change and release DXGI.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
         let (ice_tx, mut ice_rx) = tokio::sync::mpsc::channel::<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>(32);
         let (data_tx, mut data_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(128);
         let (video_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(16);
@@ -729,7 +746,18 @@ async fn process_offer_internal(
                                         return;
                                     }
                                 };
+                                // Cache the most recent frame so we can re-emit
+                                // keyframes while the screen is static (DXGI
+                                // returns Timeout instead of a frame when nothing
+                                // changes, which would otherwise starve a
+                                // mid-stream viewer of keyframes).
+                                let mut last_frame: Option<screen_capture::Frame> = None;
                                 loop {
+                                    // Exit if a newer session started (releases DXGI for it).
+                                    if CAPTURE_GENERATION.load(Ordering::Relaxed) != my_gen {
+                                        tracing::info!("Capture gen {} superseded; stopping capture.", my_gen);
+                                        break;
+                                    }
                                     // Apply any pending monitor-switch request (take the latest).
                                     let mut target: Option<u32> = None;
                                     while let Ok(idx) = switch_rx.try_recv() {
@@ -753,8 +781,10 @@ async fn process_offer_internal(
                                                 ((frame.width as usize) << 16) | (frame.height as usize),
                                                 Ordering::Relaxed,
                                             );
+                                            last_frame = Some(frame);
+                                            let f = last_frame.as_ref().unwrap();
                                             let enc_start = std::time::Instant::now();
-                                            match video::VideoEncoder::encode(&mut encoder, &frame) {
+                                            match video::VideoEncoder::encode(&mut encoder, f) {
                                                 Ok(encoded) if !encoded.data.is_empty() => {
                                                     ENCODE_LATENCY_US.store(
                                                         enc_start.elapsed().as_micros() as usize,
@@ -775,8 +805,24 @@ async fn process_offer_internal(
                                             }
                                         }
                                         Err(screen_capture::error::CaptureError::Timeout) => {
-                                            // No new frame within the timeout window; the screen
-                                            // is static. Nothing to send, just continue.
+                                            // Static screen: DXGI returned no new frame. Re-encode
+                                            // the last frame so the encoder's periodic keyframe
+                                            // timer still fires and mid-stream viewers can sync.
+                                            if let Some(f) = last_frame.as_ref() {
+                                                if let Ok(encoded) =
+                                                    video::VideoEncoder::encode(&mut encoder, f)
+                                                {
+                                                    if encoded.is_keyframe && !encoded.data.is_empty() {
+                                                        let wire = frame_h264(
+                                                            &encoded.data,
+                                                            encoded.is_keyframe,
+                                                        );
+                                                        if frame_tx.blocking_send(wire).is_err() {
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                         Err(screen_capture::error::CaptureError::DisplayChanged) => {
                                             tracing::warn!(
@@ -927,6 +973,8 @@ async fn send_input_event(event: input::InputEvent, session: tauri::State<'_, Ap
 #[tauri::command]
 async fn terminate_host_session(session: tauri::State<'_, AppSession>) -> Result<(), String> {
     info!("Terminating active session");
+    // Stop the capture thread (releases DXGI) by advancing the generation.
+    CAPTURE_GENERATION.fetch_add(1, Ordering::Relaxed);
     if let Some(transport) = session.webrtc.write().await.take() {
         if let Some(dc) = &transport.data_channel {
             let packet = DataPacket::Disconnect;

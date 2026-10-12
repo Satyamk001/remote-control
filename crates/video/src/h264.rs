@@ -16,6 +16,13 @@ pub struct H264Encoder {
     frame_id: u32,
     width: u32,
     height: u32,
+    /// Wall-clock time of the last forced IDR. We force keyframes on a time
+    /// basis (not frame count) because DXGI only yields frames on screen
+    /// changes — a static desktop advances the frame counter very slowly, so a
+    /// count-based GOP could leave a mid-stream viewer without a keyframe for a
+    /// long time.
+    last_keyframe: std::time::Instant,
+    keyframe_period: std::time::Duration,
 }
 
 impl H264Encoder {
@@ -29,13 +36,16 @@ impl H264Encoder {
             frame_id: 0,
             width: 0,
             height: 0,
+            // Backdate so the first frame forces an IDR immediately.
+            last_keyframe: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            keyframe_period: std::time::Duration::from_millis(1000),
         })
     }
 
     /// Force the next encoded frame to be an IDR keyframe. Used when a new
     /// viewer attaches and needs SPS/PPS + an intra frame to start decoding.
     pub fn request_keyframe(&mut self) {
-        self.encoder.force_intra_frame();
+        self.last_keyframe = std::time::Instant::now() - std::time::Duration::from_secs(10);
     }
 }
 
@@ -55,6 +65,14 @@ impl VideoEncoder for H264Encoder {
         self.width = frame.width;
         self.height = frame.height;
 
+        // Force an IDR on the first frame and once per keyframe_period so any
+        // viewer (including one joining mid-stream, even on a static screen)
+        // can begin decoding promptly.
+        if self.last_keyframe.elapsed() >= self.keyframe_period {
+            self.encoder.force_intra_frame();
+            self.last_keyframe = std::time::Instant::now();
+        }
+
         // DXGI delivers BGRA8; OpenH264's BgraSliceU8 handles the channel order
         // and converts to the I420 the encoder expects.
         let bgra = BgraSliceU8::new(&frame.data[..w * h * 4], (w, h));
@@ -65,10 +83,12 @@ impl VideoEncoder for H264Encoder {
             .encode(&yuv)
             .map_err(|e| VideoError::EncodeError(e.to_string()))?;
 
-        let is_keyframe = matches!(
-            bitstream.frame_type(),
-            FrameType::IDR | FrameType::I
-        );
+        let frame_type = bitstream.frame_type();
+        let is_keyframe = matches!(frame_type, FrameType::IDR | FrameType::I);
+
+        if self.frame_id < 3 {
+            tracing::info!("H264 frame {} type: {:?} (keyframe={})", self.frame_id, frame_type, is_keyframe);
+        }
 
         let data = bitstream.to_vec();
         self.frame_id = self.frame_id.wrapping_add(1);

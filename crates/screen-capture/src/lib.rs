@@ -13,7 +13,7 @@ pub enum PixelFormat {
 }
 
 /// A captured frame with metadata.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Frame {
     pub data: Vec<u8>,
     pub width: u32,
