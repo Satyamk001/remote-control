@@ -6,6 +6,8 @@ use tracing::{info, error};
 pub struct AudioCapture {
     _stream: cpal::Stream,
     pub consumer: Consumer<f32, Arc<SharedRb<f32, Vec<std::mem::MaybeUninit<f32>>>>>,
+    pub sample_rate: u32,
+    pub channels: u16,
 }
 
 impl AudioCapture {
@@ -18,6 +20,9 @@ impl AudioCapture {
             .map_err(|e| format!("Failed to get output config: {}", e))?;
             
         info!("Audio capture format: {:?}", config);
+
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels();
 
         // Ring buffer to pass audio data from the cpal thread to the WebRTC thread
         let ring = SharedRb::new(48000 * 2 * 4); // ~4 seconds of stereo 48kHz
@@ -45,6 +50,8 @@ impl AudioCapture {
         Ok(Self {
             _stream: stream,
             consumer,
+            sample_rate,
+            channels,
         })
     }
 }

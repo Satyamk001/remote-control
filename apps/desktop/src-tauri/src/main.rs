@@ -31,6 +31,12 @@ pub enum DataPacket {
     Pong { nonce: u64, ts_micros: u64 },
     /// Viewer -> host: mute/unmute system audio capture.
     ToggleAudio { muted: bool },
+    /// Viewer -> host: begin a file upload. `size` is total bytes.
+    FileOffer { file_id: String, filename: String, size: u64 },
+    /// Viewer -> host: a sequential chunk of the file, CRC32-checked.
+    FileChunk { file_id: String, seq: u64, data: Vec<u8>, checksum: u32 },
+    /// Viewer -> host: finalize the file (rename .part -> final).
+    FileComplete { file_id: String },
 }
 
 /// Monotonic-ish timestamp in microseconds since the UNIX epoch, used for RTT.
@@ -332,6 +338,58 @@ async fn connect_to_device(
 }
 
 #[tauri::command]
+async fn send_file(
+    filename: String,
+    data: Vec<u8>,
+    session: tauri::State<'_, AppSession>,
+) -> Result<(), String> {
+    use std::sync::Arc;
+    // Snapshot the data channel so we don't hold the session lock while sending.
+    let dc = {
+        let guard = session.webrtc.read().await;
+        let transport = guard.as_ref().ok_or("No active session")?;
+        transport.data_channel.clone().ok_or("No data channel")?
+    };
+
+    let file_id = format!("{}-{}", now_micros(), filename.len());
+    let size = data.len() as u64;
+
+    // Offer.
+    let offer = DataPacket::FileOffer {
+        file_id: file_id.clone(),
+        filename: filename.clone(),
+        size,
+    };
+    let bytes = bincode::serialize(&offer).map_err(|e| e.to_string())?;
+    dc.send(&bytes.into()).await.map_err(|e| e.to_string())?;
+
+    // Chunks (16KB), each CRC32-checked, in sequence.
+    const CHUNK: usize = 16 * 1024;
+    let dc2: Arc<_> = dc.clone();
+    for (seq, chunk) in data.chunks(CHUNK).enumerate() {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(chunk);
+        let checksum = hasher.finalize();
+        let packet = DataPacket::FileChunk {
+            file_id: file_id.clone(),
+            seq: seq as u64,
+            data: chunk.to_vec(),
+            checksum,
+        };
+        let bytes = bincode::serialize(&packet).map_err(|e| e.to_string())?;
+        dc2.send(&bytes.into()).await.map_err(|e| e.to_string())?;
+    }
+
+    // Complete.
+    let complete = DataPacket::FileComplete { file_id };
+    let bytes = bincode::serialize(&complete).map_err(|e| e.to_string())?;
+    dc2.send(&bytes.into()).await.map_err(|e| e.to_string())?;
+
+    info!("Sent file '{}' ({} bytes) over data channel.", filename, size);
+    Ok(())
+}
+
+#[tauri::command]
 async fn toggle_audio(muted: bool, session: tauri::State<'_, AppSession>) -> Result<(), String> {
     let packet = DataPacket::ToggleAudio { muted };
     let bytes = bincode::serialize(&packet).map_err(|e| e.to_string())?;
@@ -476,6 +534,15 @@ async fn process_offer_internal(
                 let mut clip = remote_core::clipboard::ClipboardManager::new();
                 let mut last_text = clip.get_text().unwrap_or_default();
                 let mut ping_nonce: u64 = 0;
+
+                // Incoming file uploads land in a `downloads` folder next to the
+                // working directory, with path-traversal protection in the
+                // FileReceiver.
+                let downloads = std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join("downloads");
+                let _ = std::fs::create_dir_all(&downloads);
+                let mut file_rx = remote_core::transfer::FileReceiver::new(downloads);
                 
                 loop {
                     tokio::select! {
@@ -511,6 +578,24 @@ async fn process_offer_internal(
                                     DataPacket::ToggleAudio { muted } => {
                                         info!("Host received ToggleAudio(muted={})", muted);
                                         AUDIO_MUTED.store(muted, Ordering::Relaxed);
+                                    }
+                                    DataPacket::FileOffer { file_id, filename, size } => {
+                                        info!("File offer: {} ({} bytes)", filename, size);
+                                        if let Err(e) = file_rx.accept_offer(&file_id, &filename, size) {
+                                            error!("Rejected file offer {}: {:?}", filename, e);
+                                        }
+                                    }
+                                    DataPacket::FileChunk { file_id, seq, data, checksum } => {
+                                        if let Err(e) = file_rx.receive_chunk(&file_id, seq, &data, checksum) {
+                                            error!("File chunk {} seq {} failed: {:?}", file_id, seq, e);
+                                            file_rx.cancel_transfer(&file_id);
+                                        }
+                                    }
+                                    DataPacket::FileComplete { file_id } => {
+                                        match file_rx.complete_transfer(&file_id) {
+                                            Ok(_) => info!("File {} received successfully.", file_id),
+                                            Err(e) => error!("File complete {} failed: {:?}", file_id, e),
+                                        }
                                     }
                                     DataPacket::Ping { .. } => { /* host doesn't expect pings */ }
                                 }
@@ -690,6 +775,17 @@ async fn process_offer_internal(
                     match remote_core::audio::AudioCapture::new() {
                         Ok(mut capture) => {
                             tracing::info!("WASAPI loopback audio capture active.");
+
+                            // Advertise the real capture format to the viewer as
+                            // the first message: magic "RCAF" + u32 LE sample_rate
+                            // + u16 LE channels. The viewer configures its
+                            // AudioContext from this instead of assuming 48kHz/2ch.
+                            let mut header = Vec::with_capacity(10);
+                            header.extend_from_slice(b"RCAF");
+                            header.extend_from_slice(&capture.sample_rate.to_le_bytes());
+                            header.extend_from_slice(&capture.channels.to_le_bytes());
+                            let _ = pcm_tx.blocking_send(header);
+
                             let mut scratch = vec![0f32; 4096];
                             loop {
                                 // Drop audio while muted to honor the viewer toggle
@@ -890,6 +986,7 @@ fn main() {
             switch_monitor,
             send_input_event,
             toggle_audio,
+            send_file,
             get_local_device_id,
             get_host_session_status,
             approve_connection,

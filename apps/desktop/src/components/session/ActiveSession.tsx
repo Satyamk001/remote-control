@@ -11,7 +11,8 @@ import {
   X, 
   Activity, 
   WifiOff, 
-  Check
+  Check,
+  Upload
 } from "lucide-react";
 import { invoke, listen } from "@/lib/ipc";
 import { BouncingLoader } from "../ui/bouncing-loader";
@@ -42,6 +43,8 @@ export function ActiveSession({
   const videoSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
   // Mirrors isAudioMuted for the long-lived audio effect to read live.
   const mutedRef = useRef<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   // Map a viewport cursor position to normalized 0..65535 absolute coordinates
   // over the remote desktop, accounting for `object-contain` letterboxing of the
@@ -203,14 +206,14 @@ export function ActiveSession({
 
   // Web Audio playback of the host's system audio.
   //
-  // The host streams raw interleaved stereo f32 LE PCM at 48kHz over `audioUrl`.
-  // We read the body as a stream, split samples into left/right channels, and
-  // schedule small AudioBuffers back-to-back for gapless playback. Muting is
-  // handled host-side (it stops sending) AND locally here as a fast path.
+  // The host first sends a format header ("RCAF" + u32 LE sample_rate + u16 LE
+  // channels), then a continuous stream of interleaved f32 LE PCM. We parse the
+  // header to configure the AudioContext (sample rate) and channel
+  // deinterleaving instead of assuming a fixed format, then schedule small
+  // AudioBuffers back-to-back for gapless playback. Muting is handled host-side
+  // (it stops sending) and locally here as a fast path.
   useEffect(() => {
     if (!audioUrl) return;
-    const SAMPLE_RATE = 48000;
-    const CHANNELS = 2;
 
     let cancelled = false;
     const abort = new AbortController();
@@ -219,22 +222,24 @@ export function ActiveSession({
       console.error("Web Audio API unavailable.");
       return;
     }
-    const audioCtx = new AudioCtx({ sampleRate: SAMPLE_RATE });
-    let playHead = audioCtx.currentTime;
+
+    let audioCtx: any = null;
+    let sampleRate = 48000;
+    let channels = 2;
+    let playHead = 0;
 
     const schedule = (interleaved: Float32Array) => {
-      if (mutedRef.current) return;
-      const frames = Math.floor(interleaved.length / CHANNELS);
+      if (mutedRef.current || !audioCtx) return;
+      const frames = Math.floor(interleaved.length / channels);
       if (frames === 0) return;
-      const buffer = audioCtx.createBuffer(CHANNELS, frames, SAMPLE_RATE);
-      for (let ch = 0; ch < CHANNELS; ch++) {
+      const buffer = audioCtx.createBuffer(channels, frames, sampleRate);
+      for (let ch = 0; ch < channels; ch++) {
         const out = buffer.getChannelData(ch);
-        for (let i = 0; i < frames; i++) out[i] = interleaved[i * CHANNELS + ch];
+        for (let i = 0; i < frames; i++) out[i] = interleaved[i * channels + ch];
       }
       const src = audioCtx.createBufferSource();
       src.buffer = buffer;
       src.connect(audioCtx.destination);
-      // Avoid scheduling in the past if we fell behind.
       const now = audioCtx.currentTime;
       if (playHead < now) playHead = now;
       src.start(playHead);
@@ -247,22 +252,42 @@ export function ActiveSession({
         if (!resp.body) return;
         const reader = resp.body.getReader();
 
-        // Carry leftover bytes that don't complete a 4-byte f32 sample / frame.
+        let headerParsed = false;
         let leftover = new Uint8Array(0);
-        const frameBytes = 4 * CHANNELS; // one stereo frame
 
         while (!cancelled) {
           const { done, value } = await reader.read();
           if (done) break;
           if (!value) continue;
 
-          const merged = new Uint8Array(leftover.length + value.length);
+          let merged = new Uint8Array(leftover.length + value.length);
           merged.set(leftover, 0);
           merged.set(value, leftover.length);
 
+          // Parse the 10-byte "RCAF" header before any PCM.
+          if (!headerParsed) {
+            if (merged.length < 10) {
+              leftover = merged;
+              continue;
+            }
+            const magicOk =
+              merged[0] === 0x52 && merged[1] === 0x43 && merged[2] === 0x41 && merged[3] === 0x46; // "RCAF"
+            if (magicOk) {
+              const dv = new DataView(merged.buffer, merged.byteOffset, 10);
+              sampleRate = dv.getUint32(4, true) || 48000;
+              channels = dv.getUint16(8, true) || 2;
+              merged = merged.slice(10);
+            } else {
+              console.warn("Audio header magic missing; assuming 48kHz/2ch.");
+            }
+            audioCtx = new AudioCtx({ sampleRate });
+            playHead = audioCtx.currentTime;
+            headerParsed = true;
+          }
+
+          const frameBytes = 4 * channels; // one interleaved frame
           const usable = merged.length - (merged.length % frameBytes);
           if (usable > 0) {
-            // Copy to an aligned buffer so Float32Array view is valid.
             const slice = merged.slice(0, usable);
             const floats = new Float32Array(slice.buffer, slice.byteOffset, usable / 4);
             schedule(floats);
@@ -279,7 +304,7 @@ export function ActiveSession({
     return () => {
       cancelled = true;
       abort.abort();
-      audioCtx.close().catch(() => {});
+      if (audioCtx) audioCtx.close().catch(() => {});
     };
   }, [audioUrl]);
 
@@ -399,6 +424,23 @@ export function ActiveSession({
       document.documentElement.requestFullscreen().catch(console.error);
     } else {
       document.exitFullscreen().catch(console.error);
+    }
+  };
+
+  const handleFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+    try {
+      setUploading(true);
+      const buf = await file.arrayBuffer();
+      // Tauri IPC serializes number[] for Vec<u8>.
+      const data = Array.from(new Uint8Array(buf));
+      await invoke("send_file", { filename: file.name, data });
+    } catch (err) {
+      console.error("File upload failed:", err);
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -557,6 +599,24 @@ export function ActiveSession({
               title="Sync Local Clipboard to Remote"
             >
               {clipboardCopied ? <Check className="h-4 w-4 text-emerald-400" /> : <ClipboardPaste className="h-4 w-4" />}
+            </Button>
+
+            {/* File Upload (viewer -> host) */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              onChange={handleFilePicked}
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-foreground hover:bg-secondary rounded-full h-9 w-9"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              title="Send a file to the remote machine"
+            >
+              <Upload className={`h-4 w-4 ${uploading ? "animate-pulse text-primary" : ""}`} />
             </Button>
 
             <div className="w-px h-5 bg-border/60 mx-1" />
