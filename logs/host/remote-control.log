@@ -1,0 +1,78 @@
+2026-10-12T12:02:05.104772Z  INFO desktop: Logging to D:\Satyam (CE00172125)\learn\remote-control\logs\host\remote-control.log
+2026-10-12T12:02:05.576074Z  INFO remote_core::security: Generating new device identity key...
+2026-10-12T12:02:05.943725Z  INFO desktop: Connected to signaling server as 00392A6B47E817822405A8602310A15CB3328E0A4587B6443CC6A7C212CE2DD6
+2026-10-12T12:02:36.423671Z  INFO desktop: Host received SDP Offer for session: 12d8905a-d474-40cd-a1ac-4223bba40186
+2026-10-12T12:02:36.427239Z  INFO desktop: Received remote ICE candidate
+2026-10-12T12:02:36.427314Z  INFO desktop: Received remote ICE candidate
+2026-10-12T12:02:36.433859Z  INFO desktop: Received remote ICE candidate
+2026-10-12T12:02:43.270872Z  INFO desktop: Host connection approval: true
+2026-10-12T12:02:43.440213Z  INFO webrtc::peer_connection: signaling state changed to have-remote-offer
+2026-10-12T12:02:43.440482Z  INFO webrtc_ice::mdns: mDNS is using 0.0.0.0:5353 as dest_addr
+2026-10-12T12:02:43.446452Z  INFO webrtc_mdns::conn: Looping and listening Ok(0.0.0.0:5353)
+2026-10-12T12:02:43.446479Z  INFO webrtc_ice::agent::agent_internal: [controlled]: Setting new connection state: Checking
+2026-10-12T12:02:43.446541Z  INFO webrtc::peer_connection: ICE connection state changed: checking
+2026-10-12T12:02:43.446578Z  WARN webrtc_ice::agent::agent_internal: [controlled]: pingAllCandidates called with no candidate pairs. Connection is not possible yet.
+2026-10-12T12:02:43.446600Z  INFO webrtc::peer_connection: signaling state changed to stable
+2026-10-12T12:02:43.446706Z  WARN webrtc_ice::agent::agent_internal: [controlled]: pingAllCandidates called with no candidate pairs. Connection is not possible yet.
+2026-10-12T12:02:43.446729Z  WARN webrtc_ice::agent::agent_internal: [controlled]: pingAllCandidates called with no candidate pairs. Connection is not possible yet.
+2026-10-12T12:02:43.446741Z  WARN webrtc_ice::agent::agent_internal: [controlled]: pingAllCandidates called with no candidate pairs. Connection is not possible yet.
+2026-10-12T12:02:43.446811Z  WARN webrtc_ice::agent::agent_gather: [controlled]: could not listen udp ::100: io error: The requested address is not valid in its context. (os error 10049)
+2026-10-12T12:02:43.446911Z  WARN webrtc_ice::agent::agent_gather: [controlled]: could not listen udp 80fe::c469:1c57:34eb:adc8: io error: The requested address is not valid in its context. (os error 10049)
+2026-10-12T12:02:43.446950Z  WARN webrtc_ice::agent::agent_gather: [controlled]: could not listen udp 80fe::75ea:7ab0:1a51:70e9: io error: The requested address is not valid in its context. (os error 10049)
+2026-10-12T12:02:43.447045Z  INFO webrtc::transport: Gathered ICE Candidate: "udp host 10.10.22.12:60356"
+2026-10-12T12:02:43.447108Z  INFO webrtc::transport: Gathered ICE Candidate: "udp host 172.20.176.1:60357"
+2026-10-12T12:02:43.447133Z  WARN webrtc_ice::agent::agent_gather: [controlled]: failed to resolve stun host: stun.l.google.com:19302: io error: No available ipv6 IP address found!
+2026-10-12T12:02:43.452408Z  INFO webrtc::transport: Gathered ICE Candidate: "udp srflx 182.71.127.226:603580.0.0.0"
+2026-10-12T12:02:43.940447Z  INFO desktop: Initializing DXGI Desktop Duplication API for live capture...
+2026-10-12T12:02:43.947600Z  INFO remote_core::audio: Audio capture format: SupportedStreamConfig { channels: 2, sample_rate: SampleRate(192000), buffer_size: Range { min: 0, max: 4294967295 }, sample_format: F32 }
+2026-10-12T12:02:43.971115Z  INFO desktop: DXGI capture active at 1920x1080
+2026-10-12T12:02:43.971368Z  INFO video::h264: OpenH264 software encoder initialized.
+2026-10-12T12:02:43.971380Z  INFO desktop: Video encoder: H.264.
+2026-10-12T12:02:44.201425Z  INFO video::h264: H264 frame 0 type: IDR (keyframe=true)
+2026-10-12T12:02:44.420163Z  INFO video::h264: H264 frame 1 type: Skip (keyframe=false)
+2026-10-12T12:02:44.560084Z  INFO desktop: WASAPI loopback audio capture active.
+2026-10-12T12:02:44.563497Z  INFO webrtc_ice::agent::agent_internal: [controlled]: Setting new connection state: Connected
+2026-10-12T12:02:44.563568Z  INFO webrtc::peer_connection: ICE connection state changed: connected
+2026-10-12T12:02:44.566048Z  INFO webrtc::peer_connection: peer connection state changed: connected
+2026-10-12T12:02:44.566073Z  INFO webrtc::transport: Peer Connection State has changed: connected
+2026-10-12T12:02:44.624654Z  INFO desktop: Video data channel open; starting frame delivery.
+2026-10-12T12:02:44.624891Z  INFO desktop: Sent video frame 1 as 6 chunk(s), 82104 bytes total.
+2026-10-12T12:02:44.638525Z  INFO video::h264: H264 frame 2 type: Skip (keyframe=false)
+2026-10-12T12:02:44.868106Z  INFO desktop: Sent video frame 2 as 1 chunk(s), 10089 bytes total.
+2026-10-12T12:02:45.329440Z  INFO desktop: Sent video frame 3 as 5 chunk(s), 78225 bytes total.
+2026-10-12T12:02:52.085902Z  INFO desktop: Host received ToggleAudio(muted=true)
+2026-10-12T12:02:55.278162Z  INFO desktop: Host received ToggleAudio(muted=false)
+2026-10-12T12:02:57.773812Z  INFO desktop: Host received SwitchMonitor(1)
+2026-10-12T12:02:57.908769Z  INFO desktop: Switching DXGI capture to monitor 1
+2026-10-12T12:02:57.921143Z  WARN desktop: switch_monitor failed: Initialization failed: monitor 1 does not exist (only 1 present)
+2026-10-12T12:03:05.389873Z  INFO desktop: Host received SwitchMonitor(0)
+2026-10-12T12:03:05.539908Z  INFO desktop: Switching DXGI capture to monitor 0
+2026-10-12T12:03:07.606360Z  INFO desktop: Host received ToggleAudio(muted=true)
+2026-10-12T12:03:08.022082Z  INFO desktop: Host received ToggleAudio(muted=false)
+2026-10-12T12:03:12.043022Z ERROR remote_core::clipboard: Failed to read clipboard text: The clipboard contents were not available in the requested format or the clipboard is empty.
+2026-10-12T12:03:13.862932Z  INFO desktop: File offer: id_ed25519.pub (81 bytes)
+2026-10-12T12:03:13.864750Z  INFO remote_core::transfer: Accepted file offer for id_ed25519.pub
+2026-10-12T12:03:13.865279Z  INFO remote_core::transfer: File transfer complete: "C:\\Users\\CE00172125\\downloads\\id_ed25519.pub"
+2026-10-12T12:03:13.865306Z  INFO desktop: File 1791806593862679-14 received successfully.
+2026-10-12T12:03:18.077045Z ERROR remote_core::clipboard: Failed to read clipboard text: The clipboard contents were not available in the requested format or the clipboard is empty.
+2026-10-12T12:03:20.105588Z ERROR remote_core::clipboard: Failed to read clipboard text: The clipboard contents were not available in the requested format or the clipboard is empty.
+2026-10-12T12:03:36.677974Z  INFO desktop: Terminating active session
+2026-10-12T12:03:36.868926Z  INFO desktop: Capture gen 1 superseded; stopping capture.
+2026-10-12T12:03:39.865515Z  INFO webrtc_ice::agent::agent_internal: [controlled]: Setting new connection state: Disconnected
+2026-10-12T12:03:39.865752Z  INFO webrtc::peer_connection: ICE connection state changed: disconnected
+2026-10-12T12:03:39.865772Z  INFO webrtc::peer_connection: peer connection state changed: disconnected
+2026-10-12T12:03:39.865782Z  INFO webrtc::transport: Peer Connection State has changed: disconnected
+2026-10-12T12:04:04.940407Z  WARN webrtc_ice::agent::agent_internal: [controlled]: Failed to close candidate udp4 host 10.10.22.12:55756: the agent is closed
+2026-10-12T12:04:04.940564Z  WARN webrtc_ice::agent::agent_internal: [controlled]: Failed to close candidate udp4 host 172.20.176.1:55757: the agent is closed
+2026-10-12T12:04:04.940584Z  WARN webrtc_ice::agent::agent_internal: [controlled]: Failed to close candidate udp4 srflx 182.71.127.226:55758 related 0.0.0.0:55758: the agent is closed
+2026-10-12T12:04:04.940603Z  WARN webrtc_ice::agent::agent_internal: [controlled]: Failed to close candidate udp4 prflx 10.10.22.12:55758 related :0: the agent is closed
+2026-10-12T12:04:04.940620Z  WARN webrtc_ice::agent::agent_internal: [controlled]: Failed to close candidate udp4 prflx 172.20.176.1:55758 related :0: the agent is closed
+2026-10-12T12:04:04.940638Z  INFO webrtc_ice::agent::agent_internal: [controlled]: Setting new connection state: Failed
+2026-10-12T12:04:04.940931Z  INFO webrtc::peer_connection: ICE connection state changed: failed
+2026-10-12T12:04:04.941069Z  INFO webrtc::peer_connection: peer connection state changed: failed
+2026-10-12T12:04:04.941090Z  INFO webrtc::transport: Peer Connection State has changed: failed
+2026-10-12T12:04:04.941100Z  INFO webrtc::transport: Peer connection closed (session ended).
+2026-10-12T12:04:45.430715Z  INFO desktop: Terminating active session
+2026-10-12T12:04:46.878617Z  INFO desktop: Terminating active session
+2026-10-12T12:04:47.542572Z  INFO desktop: Terminating active session
+2026-10-12T12:04:47.718456Z  INFO desktop: Terminating active session

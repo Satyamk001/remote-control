@@ -1,0 +1,37 @@
+2026-10-12T12:02:20.671132Z  INFO desktop: Logging to D:\Satyam (CE00172125)\learn\remote-control\logs\viewer\remote-control.log
+2026-10-12T12:02:20.784078Z  INFO remote_core::security: Generating new device identity key...
+2026-10-12T12:02:21.131420Z  INFO desktop: Connected to signaling server as B08546B22D246BDE1DC3D985747127DF74243D164399CF563D3039F833D1FB69
+2026-10-12T12:02:36.327027Z  INFO desktop: Connecting to device: 00392A6B47E817822405A8602310A15CB3328E0A4587B6443CC6A7C212CE2DD6
+2026-10-12T12:02:36.327125Z  INFO desktop: Found session 12d8905a-d474-40cd-a1ac-4223bba40186 for device 00392A6B47E817822405A8602310A15CB3328E0A4587B6443CC6A7C212CE2DD6
+2026-10-12T12:02:36.328593Z  INFO webrtc_ice::mdns: mDNS is using 0.0.0.0:5353 as dest_addr
+2026-10-12T12:02:36.335007Z  INFO webrtc_mdns::conn: Looping and listening Ok(0.0.0.0:5353)
+2026-10-12T12:02:36.335176Z  INFO webrtc::peer_connection: signaling state changed to have-local-offer
+2026-10-12T12:02:36.335383Z  WARN webrtc_ice::agent::agent_gather: [controlled]: could not listen udp 80fe::75ea:7ab0:1a51:70e9: io error: The requested address is not valid in its context. (os error 10049)
+2026-10-12T12:02:36.335567Z  WARN webrtc_ice::agent::agent_gather: [controlled]: could not listen udp ::100: io error: The requested address is not valid in its context. (os error 10049)
+2026-10-12T12:02:36.335594Z  WARN webrtc_ice::agent::agent_gather: [controlled]: could not listen udp 80fe::c469:1c57:34eb:adc8: io error: The requested address is not valid in its context. (os error 10049)
+2026-10-12T12:02:36.335681Z  INFO webrtc::transport: Gathered ICE Candidate: "udp host 10.10.22.12:55756"
+2026-10-12T12:02:36.335730Z  INFO webrtc::transport: Gathered ICE Candidate: "udp host 172.20.176.1:55757"
+2026-10-12T12:02:36.340683Z  WARN webrtc_ice::agent::agent_gather: [controlled]: failed to resolve stun host: stun.l.google.com:19302: io error: No available ipv6 IP address found!
+2026-10-12T12:02:36.345090Z  INFO webrtc::transport: Gathered ICE Candidate: "udp srflx 182.71.127.226:557580.0.0.0"
+2026-10-12T12:02:43.519905Z  INFO desktop: Client received SDP Answer for session: 12d8905a-d474-40cd-a1ac-4223bba40186
+2026-10-12T12:02:43.520114Z  INFO webrtc::peer_connection: signaling state changed to stable
+2026-10-12T12:02:43.520349Z  INFO webrtc_ice::agent::agent_internal: [controlling]: Setting new connection state: Checking
+2026-10-12T12:02:43.520416Z  WARN webrtc_ice::agent::agent_internal: [controlling]: pingAllCandidates called with no candidate pairs. Connection is not possible yet.
+2026-10-12T12:02:43.520508Z  INFO webrtc::peer_connection: ICE connection state changed: checking
+2026-10-12T12:02:43.522374Z  INFO desktop: Received remote ICE candidate
+2026-10-12T12:02:43.522458Z  INFO desktop: Received remote ICE candidate
+2026-10-12T12:02:43.525389Z  INFO desktop: Received remote ICE candidate
+2026-10-12T12:02:44.563636Z  INFO webrtc_ice::agent::agent_internal: [controlling]: Setting new connection state: Connected
+2026-10-12T12:02:44.563674Z  INFO webrtc::peer_connection: ICE connection state changed: connected
+2026-10-12T12:02:44.566049Z  INFO webrtc::peer_connection: peer connection state changed: connected
+2026-10-12T12:02:44.566094Z  INFO webrtc::transport: Peer Connection State has changed: connected
+2026-10-12T12:02:52.009369Z  WARN tao::platform_impl::platform::event_loop::runner: NewEvents emitted without explicit RedrawEventsCleared
+2026-10-12T12:02:52.010936Z  WARN tao::platform_impl::platform::event_loop::runner: RedrawEventsCleared emitted without explicit MainEventsCleared
+2026-10-12T12:02:57.773660Z  INFO desktop: Switching monitor to 1
+2026-10-12T12:03:02.796608Z ERROR remote_core::clipboard: Failed to read clipboard text: The clipboard contents were not available in the requested format or the clipboard is empty.
+2026-10-12T12:03:05.389743Z  INFO desktop: Switching monitor to 0
+2026-10-12T12:03:13.797915Z  WARN tao::platform_impl::platform::event_loop::runner: NewEvents emitted without explicit RedrawEventsCleared
+2026-10-12T12:03:13.799912Z  WARN tao::platform_impl::platform::event_loop::runner: RedrawEventsCleared emitted without explicit MainEventsCleared
+2026-10-12T12:03:13.862708Z  INFO desktop: Sent file 'id_ed25519.pub' (81 bytes) over data channel.
+2026-10-12T12:03:17.060984Z ERROR remote_core::clipboard: Failed to read clipboard text: The clipboard contents were not available in the requested format or the clipboard is empty.
+2026-10-12T12:03:19.092934Z ERROR remote_core::clipboard: Failed to read clipboard text: The clipboard contents were not available in the requested format or the clipboard is empty.

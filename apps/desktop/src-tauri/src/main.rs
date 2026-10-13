@@ -84,6 +84,104 @@ fn frame_h264(payload: &[u8], is_keyframe: bool) -> Vec<u8> {
     out
 }
 
+/// Maximum payload bytes per data-channel chunk. WebRTC SCTP data channels cap
+/// the per-message size (webrtc-rs negotiates ~64 KB by default), so a full
+/// 1080p MJPEG frame (hundreds of KB) sent as one message is silently rejected
+/// — which is exactly why large frames never reached the viewer while tiny
+/// input events always did. We split each framed access unit into sub-cap
+/// chunks and reassemble on the viewer.
+const VIDEO_CHUNK_PAYLOAD: usize = 16 * 1024;
+
+/// Split one already-framed access unit (`frame_h264` output) into transport
+/// chunks for the data channel. Each chunk is:
+///
+///   ["RCVC"][u32 LE frame_id][u16 LE index][u16 LE count][u32 LE len][payload]
+///
+/// The viewer reassembles chunks by `frame_id` and, once `count` chunks have
+/// arrived, concatenates their payloads back into the original `RCV1` frame and
+/// hands it to the existing loopback stream unchanged.
+fn chunk_video_frame(frame_id: u32, framed: &[u8]) -> Vec<Vec<u8>> {
+    let total = framed.len();
+    let count = ((total + VIDEO_CHUNK_PAYLOAD - 1) / VIDEO_CHUNK_PAYLOAD).max(1) as u16;
+    let mut chunks = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let start = index as usize * VIDEO_CHUNK_PAYLOAD;
+        let end = (start + VIDEO_CHUNK_PAYLOAD).min(total);
+        let payload = &framed[start..end];
+        let mut out = Vec::with_capacity(16 + payload.len());
+        out.extend_from_slice(b"RCVC");
+        out.extend_from_slice(&frame_id.to_le_bytes());
+        out.extend_from_slice(&index.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        chunks.push(out);
+    }
+    chunks
+}
+
+/// Viewer-side reassembly state for `RCVC` transport chunks. Chunks arrive in
+/// order over the reliable/ordered data channel; we accumulate payloads for the
+/// current `frame_id` and emit the complete `RCV1` frame once the final chunk
+/// (index == count-1) lands. A frame_id change resets the buffer so a dropped
+/// final chunk can't wedge the stream forever.
+#[derive(Default)]
+struct VideoReassembly {
+    frame_id: u32,
+    expected: u16,
+    buf: Vec<u8>,
+    next_index: u16,
+}
+
+/// Parse one `RCVC` chunk and, if it completes a frame, return the reassembled
+/// `RCV1` frame bytes. Malformed or out-of-sequence chunks are dropped (the
+/// stream self-heals on the next keyframe/frame boundary).
+fn reassemble_video_chunk(chunk: &[u8], state: &mut VideoReassembly) -> Option<Vec<u8>> {
+    // Header: ["RCVC"][u32 frame_id][u16 index][u16 count][u32 len][payload]
+    if chunk.len() < 16 || &chunk[0..4] != b"RCVC" {
+        return None;
+    }
+    let frame_id = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+    let index = u16::from_le_bytes([chunk[8], chunk[9]]);
+    let count = u16::from_le_bytes([chunk[10], chunk[11]]);
+    let len = u32::from_le_bytes([chunk[12], chunk[13], chunk[14], chunk[15]]) as usize;
+    if count == 0 || chunk.len() < 16 + len {
+        return None;
+    }
+    let payload = &chunk[16..16 + len];
+
+    // Start of a new frame (or resync): reset unless this continues the current.
+    if index == 0 || frame_id != state.frame_id {
+        if index != 0 {
+            // Missed the start of this frame; wait for the next frame's index 0.
+            return None;
+        }
+        state.frame_id = frame_id;
+        state.expected = count;
+        state.buf = Vec::with_capacity(len * count as usize);
+        state.next_index = 0;
+    }
+
+    // Enforce in-order continuity; drop the partial frame on any gap.
+    if index != state.next_index || frame_id != state.frame_id {
+        state.buf.clear();
+        state.next_index = 0;
+        state.expected = 0;
+        return None;
+    }
+
+    state.buf.extend_from_slice(payload);
+    state.next_index = state.next_index.wrapping_add(1);
+
+    if state.next_index == state.expected {
+        let frame = std::mem::take(&mut state.buf);
+        state.expected = 0;
+        state.next_index = 0;
+        return Some(frame);
+    }
+    None
+}
+
 /// Pick a JPEG quality + inter-frame delay (ms) from the measured RTT.
 ///
 /// Higher RTT => lower quality and lower frame rate, trading fidelity for
@@ -347,12 +445,19 @@ async fn connect_to_device(
                         return;
                     }
 
-                    while let Ok(frame) = rx.recv().await {
-                        // `frame` is already a framed access unit; relay verbatim.
-                        if socket.write_all(&frame).await.is_err() {
-                            break;
+                    // Per-connection reassembly state for `RCVC` chunks.
+                    let mut pending = VideoReassembly::default();
+                    while let Ok(chunk) = rx.recv().await {
+                        // Reassemble transport chunks (`RCVC`) back into the
+                        // original `RCV1` frame before relaying to the frontend,
+                        // which only understands the `RCV1` framing. Chunks for a
+                        // frame arrive in order over the ordered/reliable channel.
+                        BYTES_RECEIVED.fetch_add(chunk.len(), Ordering::Relaxed);
+                        if let Some(frame) = reassemble_video_chunk(&chunk, &mut pending) {
+                            if socket.write_all(&frame).await.is_err() {
+                                break;
+                            }
                         }
-                        BYTES_RECEIVED.fetch_add(frame.len(), Ordering::Relaxed);
                     }
                 });
             }
@@ -732,12 +837,75 @@ async fn process_offer_internal(
             // async task over a std::sync::mpsc channel, which performs the actual
             // WebRTC data-channel send.
             if let Some(channel) = vc {
-                // Async sender: receives finished JPEG frames and ships them.
+                // Async sender: receives finished frames and ships them in
+                // sub-cap chunks so even large (1080p MJPEG / H.264 keyframe)
+                // frames pass the SCTP per-message size limit.
                 let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
                 tokio::spawn(async move {
+                    use webrtc::data_channel::data_channel_state::RTCDataChannelState;
+
+                    // Wait for the data channel to actually reach `Open` before
+                    // streaming. Capture starts on a fixed timer that races ICE/
+                    // DTLS/SCTP setup, so the channel is frequently still
+                    // `Connecting` for the first frames — sending then throws
+                    // "DataChannel is not opened" and (previously) flooded the
+                    // log while dropping every frame. We block here instead.
+                    loop {
+                        match channel.ready_state() {
+                            RTCDataChannelState::Open => break,
+                            RTCDataChannelState::Closed | RTCDataChannelState::Closing => {
+                                tracing::warn!("Video channel closed before opening; sender exiting.");
+                                return;
+                            }
+                            _ => {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            }
+                        }
+                    }
+                    tracing::info!("Video data channel open; starting frame delivery.");
+
+                    let mut frame_id: u32 = 0;
+                    let mut closed_logged = false;
                     while let Some(bytes) = frame_rx.recv().await {
-                        if channel.send(&bytes.clone().into()).await.is_ok() {
-                            BYTES_SENT.fetch_add(bytes.len(), Ordering::Relaxed);
+                        // If the channel dropped mid-session, stop sending (and
+                        // log once) rather than erroring on every chunk forever.
+                        if channel.ready_state() != RTCDataChannelState::Open {
+                            if !closed_logged {
+                                tracing::warn!("Video channel no longer open; pausing frame delivery.");
+                                closed_logged = true;
+                            }
+                            continue;
+                        }
+
+                        frame_id = frame_id.wrapping_add(1);
+                        let chunks = chunk_video_frame(frame_id, &bytes);
+                        let mut all_ok = true;
+                        for chunk in &chunks {
+                            match channel.send(&chunk.clone().into()).await {
+                                Ok(_) => {
+                                    BYTES_SENT.fetch_add(chunk.len(), Ordering::Relaxed);
+                                }
+                                Err(e) => {
+                                    all_ok = false;
+                                    if !closed_logged {
+                                        tracing::error!(
+                                            "video chunk send failed ({} bytes): {}",
+                                            chunk.len(),
+                                            e
+                                        );
+                                        closed_logged = true;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        if frame_id <= 3 && all_ok {
+                            tracing::info!(
+                                "Sent video frame {} as {} chunk(s), {} bytes total.",
+                                frame_id,
+                                chunks.len(),
+                                bytes.len()
+                            );
                         }
                     }
                 });
@@ -915,7 +1083,19 @@ async fn process_offer_internal(
             if let Some(channel) = ac {
                 let (pcm_tx, mut pcm_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
                 tokio::spawn(async move {
+                    use webrtc::data_channel::data_channel_state::RTCDataChannelState;
+                    // Wait for the audio channel to open before streaming PCM.
+                    loop {
+                        match channel.ready_state() {
+                            RTCDataChannelState::Open => break,
+                            RTCDataChannelState::Closed | RTCDataChannelState::Closing => return,
+                            _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+                        }
+                    }
                     while let Some(bytes) = pcm_rx.recv().await {
+                        if channel.ready_state() != RTCDataChannelState::Open {
+                            continue;
+                        }
                         if channel.send(&bytes.clone().into()).await.is_ok() {
                             BYTES_SENT.fetch_add(bytes.len(), Ordering::Relaxed);
                         }
